@@ -10,13 +10,28 @@ export async function POST(req: NextRequest) {
   if (req.method === 'POST') {
     try {
       const body = await req.json();
-      const { prompt, tags, title, make_instrumental, model, wait_audio, negative_tags } = body;
+      const {
+        prompt,
+        tags,
+        title,
+        make_instrumental,
+        model,
+        mv,
+        wait_audio,
+        negative_tags,
+        gpt_description_prompt,
+        metadata
+      } = body;
       const audioInfo = await (await sunoApi((await cookies()).toString())).custom_generate(
-        prompt, tags, title,
+        prompt ?? '',
+        tags,
+        title,
         Boolean(make_instrumental),
-        model || DEFAULT_MODEL,
+        mv || model || DEFAULT_MODEL,
         Boolean(wait_audio),
-        negative_tags
+        negative_tags,
+        gpt_description_prompt,
+        metadata && typeof metadata === 'object' ? metadata : undefined
       );
       return new NextResponse(JSON.stringify(audioInfo), {
         status: 200,

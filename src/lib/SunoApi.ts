@@ -67,6 +67,15 @@ interface PersonaResponse {
   is_following: boolean;
 }
 
+type GenerationMetadata = {
+  create_mode?: string;
+  is_custom?: boolean;
+  mv?: string;
+  vocal_gender?: string;
+  web_client_pathname?: string;
+  [key: string]: any;
+};
+
 class SunoApi {
   private static BASE_URL: string = 'https://studio-api.prod.suno.com';
   private static CLERK_BASE_URL: string = 'https://auth.suno.com';
@@ -278,25 +287,25 @@ class SunoApi {
       headless: yn(process.env.BROWSER_HEADLESS, { default: true })
     });
     const context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: null });
-    const cookies = [];
+    const cookieUrl = 'https://suno.com';
     const lax: 'Lax' | 'Strict' | 'None' = 'Lax';
-    cookies.push({
+    const browserCookies: Array<{ name: string; value: string; url: string; sameSite: 'Lax' | 'Strict' | 'None' }> = [];
+
+    const sessionValue = String(this.currentToken || '').replace(/[\u0000-\u001F\u007F]/g, '').trim();
+
+    if (!sessionValue) {
+      throw new Error('Missing valid __session cookie for Playwright browser launch');
+    }
+
+    browserCookies.push({
       name: '__session',
-      value: this.currentToken+'',
-      domain: '.suno.com',
-      path: '/',
+      value: sessionValue,
+      url: cookieUrl,
       sameSite: lax
     });
-    for (const key in this.cookies) {
-      cookies.push({
-        name: key,
-        value: this.cookies[key]+'',
-        domain: '.suno.com',
-        path: '/',
-        sameSite: lax
-      })
-    }
-    await context.addCookies(cookies);
+
+    logger.info({ cookieCount: browserCookies.length }, 'Adding cookies to Playwright context');
+    await context.addCookies(browserCookies);
     return context;
   }
 
@@ -353,7 +362,7 @@ class SunoApi {
               };
               if (drag) {
                 // Say to the worker that he needs to click
-                payload.textinstructions = 'CLICK on the shapes at their edge or center as shown above—please be precise!';
+                payload.textinstructions = 'CLICK on the shapes at their edge or center as shown above?占퐌lease be precise!';
                 payload.imginstructions = (await fs.readFile(path.join(process.cwd(), 'public', 'drag-instructions.jpg'))).toString('base64');
               }
               captcha = await this.solver.coordinates(payload);
@@ -509,7 +518,9 @@ class SunoApi {
     make_instrumental: boolean = false,
     model?: string,
     wait_audio: boolean = false,
-    negative_tags?: string
+    negative_tags?: string,
+    gpt_description_prompt?: string,
+    metadata?: GenerationMetadata
   ): Promise<AudioInfo[]> {
     const startTime = Date.now();
     const audios = await this.generateSongs(
@@ -520,7 +531,12 @@ class SunoApi {
       make_instrumental,
       model,
       wait_audio,
-      negative_tags
+      negative_tags,
+      undefined,
+      undefined,
+      undefined,
+      gpt_description_prompt,
+      metadata
     );
     const costTime = Date.now() - startTime;
     logger.info(
@@ -555,12 +571,15 @@ class SunoApi {
     negative_tags?: string,
     task?: string,
     continue_clip_id?: string,
-    continue_at?: number
+    continue_at?: number,
+    gpt_description_prompt?: string,
+    metadata?: GenerationMetadata
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
+    const resolvedModel = metadata?.mv || model || DEFAULT_MODEL;
     const payload: any = {
       make_instrumental: make_instrumental,
-      mv: model || DEFAULT_MODEL,
+      mv: resolvedModel,
       prompt: '',
       generation_type: 'TEXT',
       continue_at: continue_at,
@@ -573,6 +592,15 @@ class SunoApi {
       payload.title = title;
       payload.negative_tags = negative_tags;
       payload.prompt = prompt;
+      if (gpt_description_prompt) {
+        payload.gpt_description_prompt = gpt_description_prompt;
+      }
+      if (metadata) {
+        payload.metadata = {
+          ...metadata,
+          mv: metadata.mv || resolvedModel
+        };
+      }
     } else {
       payload.gpt_description_prompt = prompt;
     }
@@ -587,6 +615,8 @@ class SunoApi {
             make_instrumental: make_instrumental,
             wait_audio: wait_audio,
             negative_tags: negative_tags,
+            gpt_description_prompt: gpt_description_prompt,
+            metadata: metadata,
             payload: payload
           },
           null,
@@ -868,3 +898,4 @@ export const sunoApi = async (cookie?: string) => {
 
   return instance;
 };
+
