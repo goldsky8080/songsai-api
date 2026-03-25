@@ -78,9 +78,9 @@ export const waitForRequests = (page: Page, signal: AbortSignal): Promise<void> 
     // Wait for an hCaptcha request for up to 1 minute
     const initialTimeout = setTimeout(() => {
       if (!requestOccurred) {
-        page.off('request', onRequest);
+        logger.info('No hCaptcha request occurred within 1 minute. Continuing without waiting for image requests.');
         cleanupListeners();
-        reject(new Error('No hCaptcha request occurred within 1 minute.'));
+        resolve();
       } else {
         // Start waiting for no hCaptcha requests
         resetTimeout();

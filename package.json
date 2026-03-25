@@ -1,6 +1,6 @@
 {
-  "name": "suno-api",
-  "description": "Use API to call the music generation service of suno.ai, and easily integrate it into agents like GPTs.",
+  "name": "songs-api",
+  "description": "Use API to call the SONGS music generation service and integrate it into agents like GPTs.",
   "author": {
     "name": "gcui.ai",
     "url": "https://github.com/gcui-art/"
