@@ -11,6 +11,7 @@ import { BrowserContext, Page, Locator, chromium, firefox } from 'rebrowser-play
 import { createCursor, Cursor } from 'ghost-cursor-playwright';
 import { promises as fs } from 'fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 // sunoApi instance caching
 const globalForSunoApi = global as unknown as { sunoApiCache?: Map<string, SunoApi> };
@@ -76,6 +77,13 @@ type GenerationMetadata = {
   [key: string]: any;
 };
 
+type CaptchaCreateContext = {
+  prompt?: string;
+  tags?: string;
+  title?: string;
+  gpt_description_prompt?: string;
+  metadata?: GenerationMetadata;
+};
 class SunoApi {
   private static BASE_URL: string = 'https://studio-api.prod.suno.com';
   private static CLERK_BASE_URL: string = 'https://auth.suno.com';
@@ -263,6 +271,26 @@ class SunoApi {
   }
 
   /**
+   * Returns the persistent browser profile directory when configured.
+   */
+  private getBrowserProfileDir(): string | null {
+    const configured = process.env.BROWSER_PROFILE_DIR?.trim();
+    return configured ? configured : null;
+  }
+
+  /**
+   * Closes a BrowserContext and its owning browser when needed.
+   */
+  private async closeBrowserContext(context: BrowserContext): Promise<void> {
+    const owningBrowser = context.browser();
+    if (owningBrowser) {
+      await owningBrowser.close();
+      return;
+    }
+    await context.close();
+  }
+
+  /**
    * Launches a browser with the necessary cookies
    * @returns {BrowserContext}
    */
@@ -277,59 +305,198 @@ class SunoApi {
       '--disable-extensions',
       '--disable-infobars'
     ];
-    // Check for GPU acceleration, as it is recommended to turn it off for Docker
     if (yn(process.env.BROWSER_DISABLE_GPU, { default: false }))
       args.push('--enable-unsafe-swiftshader',
         '--disable-gpu',
         '--disable-setuid-sandbox');
-    const browser = await this.getBrowserType().launch({
-      args,
-      headless: yn(process.env.BROWSER_HEADLESS, { default: true })
-    });
-    const context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: null });
+
+    const headless = yn(process.env.BROWSER_HEADLESS, { default: true });
+    const browserType = this.getBrowserType();
+    const profileDir = this.getBrowserProfileDir();
+
+    let context: BrowserContext;
+    if (profileDir) {
+      logger.info({ profileDir, headless }, 'Launching persistent browser context');
+      context = await browserType.launchPersistentContext(profileDir, {
+        args,
+        headless,
+        userAgent: this.userAgent,
+        locale: process.env.BROWSER_LOCALE,
+        viewport: null
+      });
+    } else {
+      const browser = await browserType.launch({
+        args,
+        headless
+      });
+      context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: null });
+    }
+
     const cookieUrl = 'https://suno.com';
     const lax: 'Lax' | 'Strict' | 'None' = 'Lax';
     const browserCookies: Array<{ name: string; value: string; url: string; sameSite: 'Lax' | 'Strict' | 'None' }> = [];
-
     const sessionValue = String(this.currentToken || '').replace(/[\u0000-\u001F\u007F]/g, '').trim();
 
-    if (!sessionValue) {
-      throw new Error('Missing valid __session cookie for Playwright browser launch');
+    if (sessionValue) {
+      browserCookies.push({
+        name: '__session',
+        value: sessionValue,
+        url: cookieUrl,
+        sameSite: lax
+      });
+    } else {
+      logger.warn('Missing valid __session bootstrap token. Relying on persistent browser session only.');
     }
 
-    browserCookies.push({
-      name: '__session',
-      value: sessionValue,
-      url: cookieUrl,
-      sameSite: lax
-    });
-
-    logger.info({ cookieCount: browserCookies.length }, 'Adding cookies to Playwright context');
-    await context.addCookies(browserCookies);
+    if (browserCookies.length > 0) {
+      logger.info({ cookieCount: browserCookies.length }, 'Adding cookies to Playwright context');
+      await context.addCookies(browserCookies);
+    }
     return context;
+  }
+  private async resetCookieConsentState(context: BrowserContext): Promise<void> {
+    const expiredAt = 1;
+    const sameSite: 'Lax' | 'Strict' | 'None' = 'Lax';
+    const consentCookies = [
+      'OptanonConsent',
+      'OptanonAlertBoxClosed',
+      'OneTrustGPC',
+      'cookie_consent',
+      'cookieConsent'
+    ];
+
+    const expiredCookies = consentCookies.flatMap((name) => ([
+      { name, value: '', domain: 'suno.com', path: '/', expires: expiredAt, sameSite },
+      { name, value: '', domain: '.suno.com', path: '/', expires: expiredAt, sameSite },
+      { name, value: '', url: 'https://suno.com', expires: expiredAt, sameSite }
+    ]));
+
+    await context.addCookies(expiredCookies).catch(() => null);
+    await context.addInitScript(() => {
+      const fragments = ['optanon', 'consent', 'cookie'];
+      const clearMatchingStorage = (storage: Storage) => {
+        const keys: string[] = [];
+        for (let i = 0; i < storage.length; i += 1) {
+          const key = storage.key(i);
+          if (!key)
+            continue;
+          const lowered = key.toLowerCase();
+          if (fragments.some((fragment) => lowered.includes(fragment))) {
+            keys.push(key);
+          }
+        }
+        for (const key of keys) {
+          storage.removeItem(key);
+        }
+      };
+
+      try {
+        clearMatchingStorage(window.localStorage);
+      } catch {}
+      try {
+        clearMatchingStorage(window.sessionStorage);
+      } catch {}
+    });
+  }
+
+  private async nativeClickLocator(button: Locator): Promise<boolean> {
+    if (process.platform !== 'linux' || !process.env.DISPLAY)
+      return false;
+
+    try {
+      const box = await button.boundingBox();
+      if (!box)
+        return false;
+
+      const x = Math.round(box.x + box.width / 2);
+      const y = Math.round(box.y + box.height / 2);
+      const rawWindowIds = execFileSync('xdotool', ['search', '--onlyvisible', '--class', 'chromium']).toString().trim();
+      const windowId = rawWindowIds.split(/\s+/).pop();
+      if (!windowId)
+        return false;
+
+      execFileSync('xdotool', ['windowactivate', '--sync', windowId], { stdio: 'ignore' });
+      execFileSync('xdotool', ['mousemove', '--window', windowId, String(x), String(y)], { stdio: 'ignore' });
+      await sleep(0.8, 1.1);
+      execFileSync('xdotool', ['click', '1'], { stdio: 'ignore' });
+      logger.info({ method: 'xdotool-window-click', windowId, x, y }, 'Clicked Create button for manual CAPTCHA flow');
+      return true;
+    } catch (error: any) {
+      logger.warn({ error: error?.message }, 'Native xdotool click failed');
+      return false;
+    }
   }
 
   /**
    * Checks for CAPTCHA verification and solves the CAPTCHA if needed
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
-  public async getCaptcha(): Promise<string | null> {
+  public async getCaptcha(createContext?: CaptchaCreateContext): Promise<string | null> {
     if (!await this.captchaRequired())
       return null;
+
+    const manualCaptcha = yn(process.env.BROWSER_MANUAL_CAPTCHA, { default: false });
+    const manualTimeoutMs = Number(process.env.BROWSER_MANUAL_CAPTCHA_TIMEOUT_MS || 300000);
 
     logger.info('CAPTCHA required. Launching browser...')
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
+    const dismissCookieBanner = async () => {
+      const cookieButtons = [
+        page.getByRole('button', { name: /accept all cookies/i }),
+        page.getByRole('button', { name: /accept all/i }),
+        page.getByText(/accept all cookies/i),
+        page.locator('button:has-text("Accept All Cookies")'),
+        page.locator('button:has-text("Accept All")')
+      ];
+
+      for (const candidate of cookieButtons) {
+        try {
+          const button = candidate.first();
+          await button.waitFor({ state: 'visible', timeout: 1500 });
+          await button.click({ force: true });
+          logger.info('Accepted cookie banner automatically');
+          return true;
+        } catch {
+        }
+      }
+
+      return false;
+    };
     await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
+    await dismissCookieBanner().catch(() => false);
 
     logger.info('Waiting for Suno interface to load');
-    const textarea = page.locator('.custom-textarea, textarea, [contenteditable="true"]');
+    const lyricsInput = page.getByTestId('lyrics-textarea').or(page.locator('textarea[placeholder*="Write some lyrics"]')).or(page.locator('.custom-textarea textarea'));
+    const styleInput = page.getByPlaceholder(/Describe the sound you want/i)
+      .or(page.getByPlaceholder(/bass line/i))
+      .or(page.locator('textarea[maxlength="500"]'))
+      .or(page.locator('textarea[maxlength="1000"]'));
+    const titleInput = page.getByPlaceholder(/title/i)
+      .or(page.locator('input[name="title"]'))
+      .or(page.locator('input[placeholder*="Title"]'))
+      .or(page.locator('input[placeholder*="title"]'));
+    const fillField = async (locator: Locator, value?: string, timeout: number = 4000) => {
+      const text = value?.trim();
+      if (!text)
+        return false;
+      try {
+        const field = locator.first();
+        await field.waitFor({ state: 'visible', timeout });
+        await this.click(field);
+        await field.fill('');
+        await field.pressSequentially(text, { delay: 25 });
+        return true;
+      } catch {
+        return false;
+      }
+    };
     await Promise.race([
       page.waitForResponse(
         (response) => response.url().includes('/api/project/') && response.request().method() === 'GET',
         { timeout: 90000 }
       ).catch(() => null),
-      textarea.first().waitFor({ state: 'visible', timeout: 90000 }).catch(() => null),
+      lyricsInput.first().waitFor({ state: 'visible', timeout: 90000 }).catch(() => null),
       page.waitForLoadState('networkidle', { timeout: 90000 }).catch(() => null)
     ]);
 
@@ -338,21 +505,45 @@ class SunoApi {
 
     logger.info('Triggering the CAPTCHA');
     try {
-      await page.getByLabel('Close').click({ timeout: 2000 }); // close all popups
-      // await this.click(page, { x: 318, y: 13 });
+      await page.getByLabel('Close').click({ timeout: 2000 });
     } catch (e) { }
 
     try {
-      await textarea.first().waitFor({ state: 'visible', timeout: 90000 });
+      await lyricsInput.first().waitFor({ state: 'visible', timeout: 90000 });
     } catch {
       logger.info('Text input not visible after CAPTCHA wait. Reloading once and retrying.');
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => null);
+      await dismissCookieBanner().catch(() => false);
       await page.waitForLoadState('networkidle', { timeout: 90000 }).catch(() => null);
-      await textarea.first().waitFor({ state: 'visible', timeout: 90000 });
+      await lyricsInput.first().waitFor({ state: 'visible', timeout: 90000 });
     }
 
-    await this.click(textarea.first());
-    await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
+    const lyricsText = createContext?.prompt?.trim() || '테스트';
+    const styleText = createContext?.tags?.trim() || '발라드';
+    const titleText = createContext?.title?.trim() || '';
+
+    const lyricsFilled = lyricsText
+      ? await fillField(lyricsInput, lyricsText, 90000)
+      : false;
+
+    if (!lyricsFilled) {
+      await this.click(lyricsInput.first());
+      await lyricsInput.first().fill('');
+      await lyricsInput.first().pressSequentially('Lorem ipsum', { delay: 80 });
+    }
+
+    if (styleText) {
+      const styleFilled = await fillField(styleInput, styleText);
+      logger.info({ styleFilled }, 'Filled style field for manual CAPTCHA flow');
+      await sleep(0.8, 1.2);
+    }
+
+    if (titleText) {
+      const titleFilled = await fillField(titleInput, titleText);
+      logger.info({ titleFilled }, 'Filled title field for manual CAPTCHA flow');
+      await sleep(0.5, 0.9);
+    }
+
 
     const clickCreateButton = async () => {
       const candidates = [
@@ -365,27 +556,130 @@ class SunoApi {
         try {
           const button = candidate.first();
           await button.waitFor({ state: 'visible', timeout: 5000 });
-          await this.click(button);
-          return true;
+          await button.scrollIntoViewIfNeeded().catch(() => null);
+          await button.focus().catch(() => null);
+          await button.hover({ force: true }).catch(() => null);
+          await sleep(0.8, 1.2);
+
+          const nativeClicked = await this.nativeClickLocator(button);
+          if (nativeClicked)
+            return true;
+
+          try {
+            const box = await button.boundingBox();
+            if (box) {
+              const centerX = box.x + box.width / 2;
+              const centerY = box.y + box.height / 2;
+              await page.mouse.move(centerX, centerY, { steps: 20 });
+              await sleep(0.8, 1.1);
+              await page.mouse.click(centerX, centerY);
+              await sleep(0.5, 0.8);
+              await page.mouse.click(centerX, centerY);
+              await button.press('Enter').catch(() => null);
+              logger.info({ method: 'hover+double-mouse-click+enter' }, 'Clicked Create button for manual CAPTCHA flow');
+              return true;
+            }
+          } catch {
+          }
+
+          try {
+            await button.click({ timeout: 1500 });
+            await sleep(0.5, 0.8);
+            await button.click({ timeout: 1500 }).catch(() => null);
+            await button.press('Enter').catch(() => null);
+            await button.press(' ').catch(() => null);
+            logger.info({ method: 'playwright-double-click+keys' }, 'Clicked Create button for manual CAPTCHA flow');
+            return true;
+          } catch {
+          }
+
+          try {
+            await button.evaluate((el: Element) => {
+              (el as HTMLElement).click();
+            });
+            await sleep(0.5, 0.8);
+            await button.evaluate((el: Element) => {
+              (el as HTMLElement).click();
+            }).catch(() => null);
+            await button.press('Enter').catch(() => null);
+            logger.info({ method: 'dom-double-click+enter' }, 'Clicked Create button for manual CAPTCHA flow');
+            return true;
+          } catch {
+          }
         } catch {
-          // Try the next selector.
         }
       }
 
       return false;
     };
 
+    let manualCaptchaPromise: Promise<string> | null = null;
+    if (manualCaptcha) {
+      logger.info({ manualTimeoutMs }, 'Manual CAPTCHA mode enabled. Solve the challenge in the opened browser window.');
+      manualCaptchaPromise = new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled)
+            return;
+          settled = true;
+          reject(new Error('CAPTCHA token was not acquired in time.'));
+        }, manualTimeoutMs);
+
+        page.route('**/api/generate/v2/**', async (route: any) => {
+          try {
+            const request = route.request();
+            const requestBody = request.postDataJSON();
+            const token = requestBody?.token ?? null;
+            await route.abort();
+
+            if (!token) {
+              clearTimeout(timeout);
+              if (!settled) {
+                settled = true;
+                reject(new Error('CAPTCHA token missing in generate request.'));
+              }
+              return;
+            }
+
+            this.currentToken = request.headers().authorization?.split('Bearer ').pop();
+            logger.info('Manual CAPTCHA solved. Token received.');
+            clearTimeout(timeout);
+            if (!settled) {
+              settled = true;
+              resolve(token);
+            }
+          } catch (err) {
+            clearTimeout(timeout);
+            if (!settled) {
+              settled = true;
+              reject(err);
+            }
+          }
+        });
+      });
+    }
+
     let createClicked = await clickCreateButton();
     if (!createClicked) {
       logger.info('Create button not found after CAPTCHA. Reloading once and retrying.');
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => null);
+      await dismissCookieBanner().catch(() => false);
       await page.waitForLoadState('networkidle', { timeout: 90000 }).catch(() => null);
-      await textarea.first().waitFor({ state: 'visible', timeout: 90000 }).catch(() => null);
+      await lyricsInput.first().waitFor({ state: 'visible', timeout: 90000 }).catch(() => null);
       createClicked = await clickCreateButton();
     }
 
     if (!createClicked) {
+      await this.closeBrowserContext(browser).catch(() => null);
       throw new Error('Create button not found after CAPTCHA flow');
+    }
+
+    if (manualCaptcha && manualCaptchaPromise) {
+      try {
+        return await manualCaptchaPromise;
+      } finally {
+        await this.closeBrowserContext(browser).catch(() => null);
+      }
     }
 
     const controller = new AbortController();
@@ -397,7 +691,7 @@ class SunoApi {
           return;
         settled = true;
         controller.abort();
-        browser.browser()?.close();
+        void this.closeBrowserContext(browser).catch(() => null);
         resolve(value);
       };
 
@@ -406,17 +700,24 @@ class SunoApi {
           return;
         settled = true;
         controller.abort();
-        browser.browser()?.close();
+        void this.closeBrowserContext(browser).catch(() => null);
         reject(error);
       };
 
       page.route('**/api/generate/v2/**', async (route: any) => {
         try {
-          logger.info('hCaptcha token received. Closing browser');
-          route.abort();
           const request = route.request();
-          this.currentToken = request.headers().authorization.split('Bearer ').pop();
-          finish(request.postDataJSON().token ?? null);
+          const token = request.postDataJSON()?.token ?? null;
+          await route.abort();
+
+          if (!token) {
+            fail(new Error('CAPTCHA token missing in generate request.'));
+            return;
+          }
+
+          logger.info('hCaptcha token received. Closing browser');
+          this.currentToken = request.headers().authorization?.split('Bearer ').pop();
+          finish(token);
         } catch (err) {
           fail(err);
         }
@@ -434,8 +735,7 @@ class SunoApi {
             const prompt = challenge.locator('.prompt-text').first();
             const promptVisible = await prompt.isVisible({ timeout: 5000 }).catch(() => false);
             if (!promptVisible) {
-              logger.info('hCaptcha challenge prompt did not appear. Continuing without captcha token.');
-              finish(null);
+              fail(new Error('hCaptcha challenge prompt did not appear. Manual intervention is required.'));
               return;
             }
 
@@ -504,15 +804,16 @@ class SunoApi {
             }
           }
         } catch (e: any) {
+          if (settled)
+            return;
           if (e.message.includes('been closed') || e.message === 'AbortError')
-            finish(null);
+            fail(new Error('CAPTCHA flow was interrupted before token acquisition.'));
           else
             fail(e);
         }
       })().catch(fail);
     });
   }
-
   /**
    * Imitates Cloudflare Turnstile loading error. Unused right now, left for future
    */
@@ -661,7 +962,7 @@ class SunoApi {
       continue_at: continue_at,
       continue_clip_id: continue_clip_id,
       task: task,
-      token: await this.getCaptcha()
+      token: await this.getCaptcha({ prompt, tags, title, gpt_description_prompt, metadata })
     };
     if (isCustom) {
       payload.tags = tags;
@@ -889,6 +1190,10 @@ class SunoApi {
 
     const audios = response.data.clips;
 
+    if (process.env.SUNO_DEBUG_RAW_FEED === 'true' && audios?.[0]) {
+      console.log('[SunoApi.get] raw first clip:', JSON.stringify(audios[0], null, 2));
+    }
+
     return audios.map((audio: any) => ({
       id: audio.id,
       title: audio.title,
@@ -974,5 +1279,19 @@ export const sunoApi = async (cookie?: string) => {
 
   return instance;
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
