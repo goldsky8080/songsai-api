@@ -84,6 +84,14 @@ type CaptchaCreateContext = {
   gpt_description_prompt?: string;
   metadata?: GenerationMetadata;
 };
+
+type ManualCaptchaLockState = {
+  requestId: string;
+  acquiredAt: number;
+  expiresAt: number;
+};
+
+let manualCaptchaLock: ManualCaptchaLockState | null = null;
 class SunoApi {
   private static BASE_URL: string = 'https://studio-api.prod.suno.com';
   private static CLERK_BASE_URL: string = 'https://auth.suno.com';
@@ -437,6 +445,28 @@ class SunoApi {
 
     const manualCaptcha = yn(process.env.BROWSER_MANUAL_CAPTCHA, { default: false });
     const manualTimeoutMs = Number(process.env.BROWSER_MANUAL_CAPTCHA_TIMEOUT_MS || 300000);
+    const manualLockRequestId = manualCaptcha ? randomUUID() : null;
+
+    if (manualCaptcha) {
+      const now = Date.now();
+      if (manualCaptchaLock && manualCaptchaLock.expiresAt > now) {
+        logger.warn({
+          activeRequestId: manualCaptchaLock.requestId,
+          acquiredAt: manualCaptchaLock.acquiredAt,
+          expiresAt: manualCaptchaLock.expiresAt
+        }, 'Manual CAPTCHA lock already active');
+        throw new Error('Another manual CAPTCHA flow is already in progress. Please try again shortly.');
+      }
+
+      manualCaptchaLock = {
+        requestId: manualLockRequestId!,
+        acquiredAt: now,
+        expiresAt: now + manualTimeoutMs + 60000
+      };
+      logger.info({ requestId: manualLockRequestId, expiresAt: manualCaptchaLock.expiresAt }, 'Acquired manual CAPTCHA lock');
+    }
+
+    try {
 
     logger.info('CAPTCHA required. Launching browser...')
     const browser = await this.launchBrowser();
@@ -518,52 +548,161 @@ class SunoApi {
       await lyricsInput.first().waitFor({ state: 'visible', timeout: 90000 });
     }
 
-    const lyricsText = createContext?.prompt?.trim() || '테스트';
-    const styleText = createContext?.tags?.trim() || '발라드';
+    const createMode = `${createContext?.metadata?.create_mode || ''}`.trim().toLowerCase();
+    const hasAiDescriptionPrompt = Boolean(createContext?.gpt_description_prompt?.trim());
+    const shouldLeaveLyricsEmpty = hasAiDescriptionPrompt || createMode.includes('ai') || createMode.includes('auto');
+    const lyricsText = shouldLeaveLyricsEmpty ? '' : (createContext?.prompt?.trim() || '');
+    const styleText = shouldLeaveLyricsEmpty
+      ? [createContext?.tags?.trim(), createContext?.gpt_description_prompt?.trim()].filter(Boolean).join(', ')
+      : (createContext?.tags?.trim() || '');
     const titleText = createContext?.title?.trim() || '';
 
-    const lyricsFilled = lyricsText
-      ? await fillField(lyricsInput, lyricsText, 90000)
-      : false;
+    logger.info({
+      createMode,
+      hasAiDescriptionPrompt,
+      shouldLeaveLyricsEmpty,
+      lyricsLength: lyricsText.length,
+      styleLength: styleText.length,
+      titleLength: titleText.length
+    }, 'Prepared manual CAPTCHA field values');
 
-    if (!lyricsFilled) {
-      await this.click(lyricsInput.first());
-      await lyricsInput.first().fill('');
-      await lyricsInput.first().pressSequentially('Lorem ipsum', { delay: 80 });
+    try {
+      const lyricsField = lyricsInput.first();
+      await lyricsField.waitFor({ state: 'visible', timeout: 90000 });
+      await this.click(lyricsField).catch(() => null);
+      await lyricsField.fill('');
+      if (lyricsText) {
+        await lyricsField.pressSequentially(lyricsText, { delay: 25 });
+        logger.info({ lyricsLength: lyricsText.length }, 'Filled lyrics field for manual CAPTCHA flow');
+      } else {
+        logger.info('Left lyrics field empty for manual CAPTCHA flow');
+      }
+    } catch (error: any) {
+      logger.warn({ error: error?.message }, 'Unable to set lyrics field for manual CAPTCHA flow');
     }
 
     if (styleText) {
       const styleFilled = await fillField(styleInput, styleText);
-      logger.info({ styleFilled }, 'Filled style field for manual CAPTCHA flow');
+      logger.info({ styleFilled, styleText }, 'Filled style field for manual CAPTCHA flow');
       await sleep(0.8, 1.2);
     }
 
     if (titleText) {
       const titleFilled = await fillField(titleInput, titleText);
-      logger.info({ titleFilled }, 'Filled title field for manual CAPTCHA flow');
+      logger.info({ titleFilled, titleText }, 'Filled title field for manual CAPTCHA flow');
       await sleep(0.5, 0.9);
     }
 
-
     const clickCreateButton = async () => {
-      const candidates = [
+      const candidateLocators = [
+        page.getByRole('button', { name: /^create$/i }),
         page.getByRole('button', { name: /create/i }),
         page.locator('button[aria-label="Create"]'),
-        page.locator('button:has-text("Create")')
+        page.locator('button:has-text("Create")'),
+        page.locator('[role="button"]:has-text("Create")')
       ];
 
-      for (const candidate of candidates) {
+      type CreateCandidate = {
+        button: any;
+        source: string;
+        text: string;
+        box: { x: number; y: number; width: number; height: number };
+        score: number;
+      };
+
+      const rankedCandidates: CreateCandidate[] = [];
+
+      for (const [index, candidate] of candidateLocators.entries()) {
         try {
-          const button = candidate.first();
-          await button.waitFor({ state: 'visible', timeout: 5000 });
+          const count = await candidate.count().catch(() => 0);
+          for (let i = 0; i < count; i++) {
+            try {
+              const button = candidate.nth(i);
+              await button.waitFor({ state: 'visible', timeout: 1500 }).catch(() => null);
+              const box = await button.boundingBox();
+              if (!box || box.width < 80 || box.height < 24)
+                continue;
+
+              const text = ((await button.innerText().catch(() => '')) || '').trim();
+              let score = box.y * 10 + box.width + box.height;
+
+              if (/^create$/i.test(text))
+                score += 5000;
+              else if (/create/i.test(text))
+                score += 2500;
+
+              if (box.width >= 180)
+                score += 1500;
+              if (box.height >= 40)
+                score += 500;
+              if (box.y >= 500)
+                score += 2500;
+
+              rankedCandidates.push({
+                button,
+                source: `candidate-${index}-nth-${i}`,
+                text,
+                box,
+                score
+              });
+            } catch {
+            }
+          }
+        } catch {
+        }
+      }
+
+      rankedCandidates.sort((a, b) => b.score - a.score);
+
+      logger.info({
+        candidates: rankedCandidates.slice(0, 5).map((candidate) => ({
+          source: candidate.source,
+          text: candidate.text,
+          x: Math.round(candidate.box.x),
+          y: Math.round(candidate.box.y),
+          width: Math.round(candidate.box.width),
+          height: Math.round(candidate.box.height),
+          score: Math.round(candidate.score)
+        }))
+      }, 'Ranked Create button candidates for manual CAPTCHA flow');
+
+      for (const candidate of rankedCandidates) {
+        try {
+          const button = candidate.button;
           await button.scrollIntoViewIfNeeded().catch(() => null);
           await button.focus().catch(() => null);
           await button.hover({ force: true }).catch(() => null);
           await sleep(0.8, 1.2);
 
+          logger.info({
+            source: candidate.source,
+            text: candidate.text,
+            x: Math.round(candidate.box.x),
+            y: Math.round(candidate.box.y),
+            width: Math.round(candidate.box.width),
+            height: Math.round(candidate.box.height),
+            score: Math.round(candidate.score)
+          }, 'Trying Create button candidate for manual CAPTCHA flow');
+
           const nativeClicked = await this.nativeClickLocator(button);
-          if (nativeClicked)
+          if (nativeClicked) {
+            if (manualCaptcha) {
+              await sleep(1.2, 1.6);
+              await this.nativeClickLocator(button).catch(() => false);
+              await sleep(0.8, 1.2);
+              await button.press('Enter').catch(() => null);
+              await sleep(0.5, 0.8);
+              await button.press(' ').catch(() => null);
+              logger.info({ method: 'xdotool-window-click+delayed-confirm-keys', source: candidate.source }, 'Clicked Create button for manual CAPTCHA flow');
+            } else {
+              await sleep(0.6, 0.9);
+            }
             return true;
+          }
+
+          if (manualCaptcha) {
+            logger.warn('Native xdotool click unavailable in manual CAPTCHA mode. Falling back to Playwright click methods.');
+          }
 
           try {
             const box = await button.boundingBox();
@@ -576,7 +715,7 @@ class SunoApi {
               await sleep(0.5, 0.8);
               await page.mouse.click(centerX, centerY);
               await button.press('Enter').catch(() => null);
-              logger.info({ method: 'hover+double-mouse-click+enter' }, 'Clicked Create button for manual CAPTCHA flow');
+              logger.info({ method: 'hover+double-mouse-click+enter-fallback', source: candidate.source }, 'Clicked Create button for manual CAPTCHA flow');
               return true;
             }
           } catch {
@@ -588,7 +727,7 @@ class SunoApi {
             await button.click({ timeout: 1500 }).catch(() => null);
             await button.press('Enter').catch(() => null);
             await button.press(' ').catch(() => null);
-            logger.info({ method: 'playwright-double-click+keys' }, 'Clicked Create button for manual CAPTCHA flow');
+            logger.info({ method: 'playwright-double-click+keys', source: candidate.source }, 'Clicked Create button for manual CAPTCHA flow');
             return true;
           } catch {
           }
@@ -602,7 +741,7 @@ class SunoApi {
               (el as HTMLElement).click();
             }).catch(() => null);
             await button.press('Enter').catch(() => null);
-            logger.info({ method: 'dom-double-click+enter' }, 'Clicked Create button for manual CAPTCHA flow');
+            logger.info({ method: 'dom-double-click+enter', source: candidate.source }, 'Clicked Create button for manual CAPTCHA flow');
             return true;
           } catch {
           }
@@ -617,12 +756,27 @@ class SunoApi {
     if (manualCaptcha) {
       logger.info({ manualTimeoutMs }, 'Manual CAPTCHA mode enabled. Solve the challenge in the opened browser window.');
       manualCaptchaPromise = new Promise<string>((resolve, reject) => {
+        const manualMatchStartedAtMs = Date.now();
         let settled = false;
-        const timeout = setTimeout(() => {
+        const timeout = setTimeout(async () => {
+          if (settled)
+            return;
+          try {
+            const matched = await this.waitForRecentGeneratedMatch(createContext, manualMatchStartedAtMs, 45000);
+            if (matched?.id) {
+              clearTimeout(timeout);
+              if (!settled) {
+                settled = true;
+                resolve(`RECENT_MATCH:${matched.id}`);
+              }
+              return;
+            }
+          } catch (error) {
+          }
           if (settled)
             return;
           settled = true;
-          reject(new Error('CAPTCHA token was not acquired in time.'));
+          reject(new Error('CAPTCHA token was not acquired in time and no recent generated result matched the request.'));
         }, manualTimeoutMs);
 
         page.route('**/api/generate/v2/**', async (route: any) => {
@@ -813,6 +967,12 @@ class SunoApi {
         }
       })().catch(fail);
     });
+    } finally {
+      if (manualCaptcha && manualLockRequestId && manualCaptchaLock?.requestId === manualLockRequestId) {
+        manualCaptchaLock = null;
+        logger.info({ requestId: manualLockRequestId }, 'Released manual CAPTCHA lock');
+      }
+    }
   }
   /**
    * Imitates Cloudflare Turnstile loading error. Unused right now, left for future
@@ -954,6 +1114,13 @@ class SunoApi {
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
     const resolvedModel = metadata?.mv || model || DEFAULT_MODEL;
+    const captchaResult = await this.getCaptcha({ prompt, tags, title, gpt_description_prompt, metadata });
+    if (typeof captchaResult === 'string' && captchaResult.startsWith('RECENT_MATCH:')) {
+      const matchedClipId = captchaResult.replace('RECENT_MATCH:', '');
+      logger.info({ matchedClipId, title }, 'Using recent result fallback match instead of generate API token');
+      return await this.get([matchedClipId]);
+    }
+
     const payload: any = {
       make_instrumental: make_instrumental,
       mv: resolvedModel,
@@ -962,7 +1129,7 @@ class SunoApi {
       continue_at: continue_at,
       continue_clip_id: continue_clip_id,
       task: task,
-      token: await this.getCaptcha({ prompt, tags, title, gpt_description_prompt, metadata })
+      token: captchaResult
     };
     if (isCustom) {
       payload.tags = tags;
@@ -1170,6 +1337,68 @@ class SunoApi {
    * @param page An optional page number to retrieve audio information from.
    * @returns A promise that resolves to an array of AudioInfo objects.
    */
+  private normalizeRecentMatchText(text?: string): string {
+    return `${text || ''}`
+      .toLowerCase()
+      .replace(/\s+/g, '')
+      .replace(/[^\p{L}\p{N}]/gu, '')
+      .trim();
+  }
+
+  private async waitForRecentGeneratedMatch(
+    createContext?: CaptchaCreateContext,
+    startedAtMs: number = Date.now(),
+    timeoutMs: number = 45000
+  ): Promise<AudioInfo | null> {
+    const normalizedTitle = this.normalizeRecentMatchText(createContext?.title);
+    const normalizedPromptSnippet = this.normalizeRecentMatchText(createContext?.prompt?.split('\n')[0]?.slice(0, 24));
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      try {
+        const recent = await this.get(undefined, null);
+        const candidates = recent
+          .filter((audio) => {
+            const createdAtMs = Date.parse(audio.created_at || '');
+            return Number.isFinite(createdAtMs) && createdAtMs >= startedAtMs - 120000;
+          })
+          .map((audio) => {
+            const normalizedAudioTitle = this.normalizeRecentMatchText(audio.title);
+            const normalizedAudioLyric = this.normalizeRecentMatchText(audio.lyric);
+            let score = 0;
+            if (normalizedTitle) {
+              if (normalizedAudioTitle === normalizedTitle)
+                score += 100;
+              else if (normalizedAudioTitle.includes(normalizedTitle) || normalizedTitle.includes(normalizedAudioTitle))
+                score += 60;
+            }
+            if (normalizedPromptSnippet && normalizedAudioLyric.includes(normalizedPromptSnippet))
+              score += 25;
+            return { audio, score, createdAtMs: Date.parse(audio.created_at || '') };
+          })
+          .filter((entry) => entry.score > 0)
+          .sort((a, b) => b.score - a.score || b.createdAtMs - a.createdAtMs);
+
+        if (candidates[0]) {
+          logger.info({
+            clipId: candidates[0].audio.id,
+            title: candidates[0].audio.title,
+            score: candidates[0].score,
+            created_at: candidates[0].audio.created_at
+          }, 'Matched recent generated result for manual CAPTCHA flow');
+          return candidates[0].audio;
+        }
+      } catch (error: any) {
+        logger.warn({ error: error?.message }, 'Recent generated result polling failed');
+      }
+
+      await sleep(3, 3);
+    }
+
+    logger.warn({ title: createContext?.title, timeoutMs }, 'Recent generated result match timed out');
+    return null;
+  }
+
   public async get(
     songIds?: string[],
     page?: string | null
@@ -1279,6 +1508,10 @@ export const sunoApi = async (cookie?: string) => {
 
   return instance;
 };
+
+
+
+
 
 
 
