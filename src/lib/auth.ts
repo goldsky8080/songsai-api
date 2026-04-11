@@ -34,7 +34,7 @@ export async function createSessionToken(user: SessionUser) {
 export function buildSessionCookieOptions(maxAge: number) {
   return {
     httpOnly: true,
-    sameSite: "lax" as const,
+    sameSite: "none" as const,
     secure: isSecureCookie(),
     path: "/",
     maxAge,
