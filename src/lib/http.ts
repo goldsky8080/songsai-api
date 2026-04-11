@@ -22,7 +22,7 @@ function getAllowedOrigin(origin: string | null) {
 
 export function buildCorsHeaders(request: NextRequest) {
   const origin = getAllowedOrigin(request.headers.get("origin"));
-  const [fallbackOrigin] = getAllowedOrigins();
+  const fallbackOrigin = getAllowedOrigins()[0] ?? getEnv().APP_URL;
 
   return {
     "Access-Control-Allow-Origin": origin ?? fallbackOrigin,
