@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
@@ -11,6 +12,7 @@ import {
 import { getEnv } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
+const GOOGLE_REDIRECT_COOKIE_NAME = "songsai-api-google-redirect";
 
 type GoogleTokenResponse = {
   access_token: string;
@@ -28,9 +30,23 @@ function buildGoogleRedirectUri() {
   return `${getEnv().APP_URL}/api/v1/auth/google/callback`;
 }
 
+function getAllowedFrontendOrigins() {
+  const env = getEnv();
+  const extraOrigins = env.FRONTEND_URLS
+    ? env.FRONTEND_URLS.split(",").map((value) => value.trim()).filter(Boolean)
+    : [];
+
+  return Array.from(new Set([env.FRONTEND_URL, ...extraOrigins].filter(Boolean)));
+}
+
 function buildFrontendRedirect(pathname: string, params?: Record<string, string>) {
   const env = getEnv();
-  const baseUrl = env.FRONTEND_URL ?? env.APP_URL;
+  const redirectCookieValue = cookies().get(GOOGLE_REDIRECT_COOKIE_NAME)?.value;
+  const allowedOrigins = getAllowedFrontendOrigins();
+  const baseUrl =
+    (redirectCookieValue && allowedOrigins.includes(redirectCookieValue) ? redirectCookieValue : null) ??
+    allowedOrigins[0] ??
+    env.APP_URL;
   const url = new URL(pathname, baseUrl);
 
   if (params) {
@@ -144,6 +160,11 @@ export async function GET(request: NextRequest) {
   });
   response.cookies.set({
     name: GOOGLE_AUTH_STATE_COOKIE_NAME,
+    value: "",
+    ...buildOAuthStateCookieOptions(0),
+  });
+  response.cookies.set({
+    name: GOOGLE_REDIRECT_COOKIE_NAME,
     value: "",
     ...buildOAuthStateCookieOptions(0),
   });
