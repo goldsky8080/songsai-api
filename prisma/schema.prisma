@@ -13,14 +13,192 @@ enum UserRole {
   ADMIN
 }
 
+enum MusicStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum VideoStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum JobTargetType {
+  MUSIC
+  VIDEO
+}
+
+enum JobType {
+  MUSIC_GENERATION
+  MUSIC_STATUS_POLL
+  VIDEO_RENDER
+}
+
+enum QueueStatus {
+  QUEUED
+  ACTIVE
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum AssetStatus {
+  PENDING
+  READY
+  FAILED
+  DELETED
+}
+
+enum MusicAssetType {
+  MP3
+  COVER_IMAGE
+  ALIGNED_LYRICS_RAW_JSON
+  ALIGNED_LYRICS_LINES_JSON
+  TITLE_TEXT
+}
+
+enum AssetStorageTier {
+  HOT
+  ARCHIVE
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
   googleId     String?  @unique
   passwordHash String
+  freeCredits  Int      @default(0)
+  paidCredits  Int      @default(0)
+  tier         String?
   name         String?
   profileImage String?
   role         UserRole @default(USER)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  musics         Music[]
+  generationJobs GenerationJob[]
 }
+
+model Music {
+  id             String      @id @default(cuid())
+  userId         String
+  requestGroupId String?
+  title          String?
+  lyrics         String
+  stylePrompt    String
+  isMr           Boolean     @default(false)
+  provider       String
+  providerTaskId String?    @unique
+  mp3Url         String?
+  imageUrl       String?
+  videoUrl       String?
+  rawStatus      String?
+  rawPayload     Json?
+  rawResponse    Json?
+  isBonusTrack   Boolean     @default(false)
+  bonusUnlockedAt DateTime?
+  status         MusicStatus @default(QUEUED)
+  duration       Int?
+  errorMessage   String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assets         MusicAsset[]
+  videos         Video[]
+  generationJobs GenerationJob[]
+
+  @@index([userId, createdAt])
+  @@index([requestGroupId, createdAt])
+  @@index([status])
+}
+
+model MusicAsset {
+  id            String           @id @default(cuid())
+  musicId       String
+  assetType     MusicAssetType
+  status        AssetStatus      @default(PENDING)
+  storageTier   AssetStorageTier @default(HOT)
+  sourceUrl     String?
+  storageKey    String?
+  storagePath   String?
+  publicUrl     String?
+  mimeType      String?
+  fileSize      Int?
+  checksum      String?
+  archivedAt    DateTime?
+  errorMessage  String?
+  metadata      Json?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  music         Music            @relation(fields: [musicId], references: [id], onDelete: Cascade)
+
+  @@unique([musicId, assetType])
+  @@index([musicId, status])
+  @@index([assetType, status])
+  @@index([storageTier, updatedAt])
+  @@index([storageKey])
+}
+
+model Video {
+  id             String          @id @default(cuid())
+  musicId        String
+  mp4Url         String?
+  bgImageUrl     String?
+  srtUrl         String?
+  status         VideoStatus     @default(QUEUED)
+  errorMessage   String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  music          Music           @relation(fields: [musicId], references: [id], onDelete: Cascade)
+  generationJobs GenerationJob[]
+
+  @@index([musicId, createdAt])
+  @@index([status])
+}
+
+model GenerationJob {
+  id           String        @id @default(cuid())
+  userId       String
+  musicId      String?
+  videoId      String?
+  targetType   JobTargetType
+  jobType      JobType
+  queueStatus  QueueStatus   @default(QUEUED)
+  priority     Int           @default(100)
+  attemptCount Int           @default(0)
+  maxAttempts  Int           @default(3)
+  runAfter     DateTime      @default(now())
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  lockedAt     DateTime?
+  lockedBy     String?
+  lastCheckedAt DateTime?
+  providerTaskId String?
+  payload      Json?
+  result       Json?
+  errorMessage String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  music Music? @relation(fields: [musicId], references: [id], onDelete: Cascade)
+  video Video? @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([queueStatus, jobType])
+  @@index([queueStatus, runAfter, priority])
+  @@index([musicId])
+  @@index([videoId])
+  @@index([providerTaskId])
+}
+

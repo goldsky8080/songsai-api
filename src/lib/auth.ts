@@ -32,10 +32,12 @@ export async function createSessionToken(user: SessionUser) {
 }
 
 export function buildSessionCookieOptions(maxAge: number) {
+  const secure = isSecureCookie();
+
   return {
     httpOnly: true,
-    sameSite: "none" as const,
-    secure: isSecureCookie(),
+    sameSite: (secure ? "none" : "lax") as "none" | "lax",
+    secure,
     path: "/",
     maxAge,
   };
