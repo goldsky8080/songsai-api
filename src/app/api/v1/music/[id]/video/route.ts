@@ -1,16 +1,12 @@
-﻿import { JobTargetType, JobType, MusicStatus, QueueStatus, VideoStatus } from "@prisma/client";
+﻿import { randomUUID } from "node:crypto";
+import { JobTargetType, JobType, QueueStatus, VideoStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { buildCorsHeaders } from "@/lib/http";
-import { buildAlignedLyricLines } from "@/server/music/aligned-lyrics";
-import {
-  syncMusicCoverImageAsset,
-  syncMusicMetadataAssets,
-  syncMusicMp3Asset,
-} from "@/server/music/asset-storage";
-import { getAlignedLyricsFromProvider, getMusicStatusFromProvider } from "@/server/music/provider";
+import { ensureMusicMaterialsReady } from "@/server/music/finalize";
 import { isDownloadReady } from "@/server/music/policy";
+import { runMusicWorker } from "@/server/music/worker";
 
 export const dynamic = "force-dynamic";
 
@@ -20,32 +16,11 @@ type RouteContext = {
   };
 };
 
-function parseDuration(value: string | number | null | undefined) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.round(value);
-  }
-
-  if (typeof value === "string") {
-    const parsed = Number.parseFloat(value);
-    if (Number.isFinite(parsed)) {
-      return Math.round(parsed);
-    }
-  }
-
-  return null;
-}
-
-function toDbMusicStatus(status: "queued" | "processing" | "completed" | "failed") {
-  switch (status) {
-    case "processing":
-      return MusicStatus.PROCESSING;
-    case "completed":
-      return MusicStatus.COMPLETED;
-    case "failed":
-      return MusicStatus.FAILED;
-    case "queued":
-    default:
-      return MusicStatus.QUEUED;
+async function nudgeVideoQueue() {
+  try {
+    await runMusicWorker(`video-route-${randomUUID()}`);
+  } catch {
+    // Keep queued jobs retryable.
   }
 }
 
@@ -76,13 +51,6 @@ export async function POST(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: "Music not found" }, { status: 404, headers: buildCorsHeaders(request) });
   }
 
-  if (!music.mp3Url) {
-    return NextResponse.json(
-      { error: "Audio is not ready yet." },
-      { status: 409, headers: buildCorsHeaders(request) },
-    );
-  }
-
   if (!isDownloadReady(music.createdAt)) {
     return NextResponse.json(
       {
@@ -93,63 +61,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     );
   }
 
-  let currentMusic = music;
-
-  if (music.providerTaskId) {
-    const [providerState] = await getMusicStatusFromProvider([music.providerTaskId]).catch(() => []);
-
-    if (providerState) {
-      const alignedWords = await getAlignedLyricsFromProvider(music.providerTaskId).catch(() => []);
-      const alignedLines = alignedWords.length > 0 ? buildAlignedLyricLines(alignedWords) : [];
-
-      currentMusic = await db.music.update({
-        where: { id: music.id },
-        data: {
-          title: providerState.title?.trim() || music.title,
-          status:
-            providerState.status === "completed" && providerState.mp3Url
-              ? MusicStatus.COMPLETED
-              : toDbMusicStatus(providerState.status),
-          mp3Url: providerState.mp3Url ?? music.mp3Url,
-          imageUrl: providerState.imageUrl ?? music.imageUrl,
-          videoUrl: providerState.videoUrl ?? music.videoUrl,
-          rawStatus: providerState.status,
-          rawResponse: providerState,
-          duration: parseDuration(providerState.duration) ?? music.duration,
-          tags: providerState.tags ?? music.tags,
-          errorMessage: providerState.errorMessage ?? null,
-        },
-        include: {
-          videos: {
-            orderBy: {
-              createdAt: "desc",
-            },
-            take: 1,
-          },
-        },
-      });
-
-      await syncMusicMetadataAssets({
-        musicId: music.id,
-        alignedWords,
-        alignedLines,
-        titleText: providerState.title ?? currentMusic.title ?? null,
-      });
-      await syncMusicCoverImageAsset({
-        musicId: music.id,
-        sourceUrl: providerState.imageUrl ?? currentMusic.imageUrl ?? null,
-      });
-    }
-  }
-
-  if (!currentMusic.mp3Url) {
-    return NextResponse.json(
-      { error: "Audio is not ready yet." },
-      { status: 409, headers: buildCorsHeaders(request) },
-    );
-  }
-
-  const existingVideo = currentMusic.videos[0] ?? null;
+  const existingVideo = music.videos[0] ?? null;
   if (existingVideo) {
     if (existingVideo.status === VideoStatus.COMPLETED && existingVideo.mp4Url) {
       return NextResponse.json(
@@ -165,6 +77,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     }
 
     if (existingVideo.status === VideoStatus.QUEUED || existingVideo.status === VideoStatus.PROCESSING) {
+      await nudgeVideoQueue();
       return NextResponse.json(
         {
           item: {
@@ -177,22 +90,27 @@ export async function POST(request: NextRequest, context: RouteContext) {
     }
   }
 
-  const cachedMp3Asset = await syncMusicMp3Asset({
-    musicId: currentMusic.id,
-    sourceUrl: currentMusic.mp3Url,
-  });
-
-  if (!cachedMp3Asset) {
+  const materials = await ensureMusicMaterialsReady(music.id);
+  if (!materials?.mp3AssetPath || !materials.coverAssetPath) {
     return NextResponse.json(
-      { error: "Failed to prepare audio asset for video render." },
-      { status: 502, headers: buildCorsHeaders(request) },
+      { error: "Video render materials are not ready yet." },
+      { status: 409, headers: buildCorsHeaders(request) },
     );
   }
+
+  const pendingVideoJobsBeforeCreate = await db.generationJob.count({
+    where: {
+      jobType: JobType.VIDEO_RENDER,
+      queueStatus: {
+        in: [QueueStatus.QUEUED, QueueStatus.ACTIVE],
+      },
+    },
+  });
 
   const created = await db.$transaction(async (tx) => {
     const video = await tx.video.create({
       data: {
-        musicId: currentMusic.id,
+        musicId: music.id,
         status: VideoStatus.QUEUED,
       },
     });
@@ -200,25 +118,29 @@ export async function POST(request: NextRequest, context: RouteContext) {
     await tx.generationJob.create({
       data: {
         userId: sessionUser.id,
-        musicId: currentMusic.id,
+        musicId: music.id,
         videoId: video.id,
         targetType: JobTargetType.VIDEO,
         jobType: JobType.VIDEO_RENDER,
         queueStatus: QueueStatus.QUEUED,
         priority: 120,
-        maxAttempts: 6,
+        maxAttempts: 3,
         runAfter: new Date(),
-        providerTaskId: currentMusic.providerTaskId ?? null,
+        providerTaskId: materials.music.providerTaskId ?? null,
         payload: {
-          source: "provider_video",
+          source: "local_ffmpeg_render",
           requestedAt: new Date().toISOString(),
-          title: currentMusic.title,
+          title: materials.titleText,
         },
       },
     });
 
     return video;
   });
+
+  if (pendingVideoJobsBeforeCreate === 0) {
+    await nudgeVideoQueue();
+  }
 
   return NextResponse.json(
     {

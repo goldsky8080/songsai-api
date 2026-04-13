@@ -39,6 +39,13 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (!user.emailVerifiedAt) {
+    return NextResponse.json(
+      { error: "Please verify your email before logging in." },
+      { status: 403, headers: corsHeaders },
+    );
+  }
+
   const token = await createSessionToken({
     id: user.id,
     email: user.email,

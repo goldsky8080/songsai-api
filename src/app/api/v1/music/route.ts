@@ -1,9 +1,10 @@
-﻿import { randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { JobTargetType, JobType, MusicStatus, Prisma, QueueStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { buildCorsHeaders } from "@/lib/http";
+import { runMusicWorker } from "@/server/music/worker";
 import { toMusicItem } from "@/server/music/mapper";
 import { getMusicStatusFromProvider, createMusicWithProvider } from "@/server/music/provider";
 import { isDownloadReady } from "@/server/music/policy";
@@ -105,6 +106,27 @@ function buildProviderErrorResponse(error: unknown) {
   );
 }
 
+async function nudgeDueVideoQueue() {
+  const dueVideoJobs = await db.generationJob.count({
+    where: {
+      jobType: JobType.VIDEO_RENDER,
+      queueStatus: QueueStatus.QUEUED,
+      runAfter: {
+        lte: new Date(),
+      },
+    },
+  });
+
+  if (dueVideoJobs < 1) {
+    return;
+  }
+
+  try {
+    await runMusicWorker(`video-list-${randomUUID()}`);
+  } catch {
+    // Ignore worker kick failures here and keep the queue retryable.
+  }
+}
 export async function GET(request: NextRequest) {
   const sessionUser = await getSessionUser();
 
@@ -115,8 +137,18 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  await nudgeDueVideoQueue();
+
   const parsedLimit = Number.parseInt(request.nextUrl.searchParams.get("limit") ?? "20", 10);
   const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 50) : 20;
+  const parsedOffset = Number.parseInt(request.nextUrl.searchParams.get("offset") ?? "0", 10);
+  const offset = Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0;
+
+  const total = await db.music.count({
+    where: {
+      userId: sessionUser.id,
+    },
+  });
 
   let items = await db.music.findMany({
     where: {
@@ -133,6 +165,7 @@ export async function GET(request: NextRequest) {
     orderBy: {
       createdAt: "desc",
     },
+    skip: offset,
     take: limit,
   });
 
@@ -191,13 +224,22 @@ export async function GET(request: NextRequest) {
         orderBy: {
           createdAt: "desc",
         },
+        skip: offset,
         take: limit,
       });
     }
   }
 
   return NextResponse.json(
-    { items: items.map((item) => toMusicItem(item, item.videos[0] ?? null)) },
+    {
+      items: items.map((item) => toMusicItem(item, item.videos[0] ?? null)),
+      pagination: {
+        offset,
+        limit,
+        total,
+        hasMore: offset + items.length < total,
+      },
+    },
     { status: 200, headers: buildCorsHeaders(request) },
   );
 }

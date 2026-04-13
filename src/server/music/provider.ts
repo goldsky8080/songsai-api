@@ -1,6 +1,8 @@
 import type { AudioInfo } from "@/lib/SunoApi";
 import { DEFAULT_MODEL, sunoApi } from "@/lib/SunoApi";
 import { getEnv } from "@/lib/env";
+import type { AlignedLyricLine } from "./aligned-lyrics";
+import { buildAlignedLyricLines } from "./aligned-lyrics";
 import type { CreateMusicRequest } from "./schema";
 import type { ProviderAlignedLyricWord, ProviderMusicResult } from "./types";
 
@@ -183,6 +185,82 @@ export async function getAlignedLyricsFromProvider(
     });
 
   return mapped.filter((item): item is ProviderAlignedLyricWord => item !== null);
+}
+
+export async function getAlignedLyricDataFromProvider(providerTaskId: string): Promise<{
+  alignedWords: ProviderAlignedLyricWord[];
+  alignedLines: AlignedLyricLine[];
+}> {
+  const response = await (await sunoApi(getEnv().SUNO_COOKIE)).getLyricAlignment(providerTaskId);
+
+  const alignedWords =
+    response && typeof response === "object" && Array.isArray((response as { aligned_words?: unknown }).aligned_words)
+      ? ((response as { aligned_words: unknown[] }).aligned_words
+          .map((item): ProviderAlignedLyricWord | null => {
+            if (!item || typeof item !== "object") {
+              return null;
+            }
+
+            const word = (item as { word?: unknown }).word;
+            const start = (item as { start_s?: unknown }).start_s;
+            const end = (item as { end_s?: unknown }).end_s;
+
+            if (typeof word !== "string" || typeof start !== "number" || typeof end !== "number") {
+              return null;
+            }
+
+            return {
+              word,
+              start_s: start,
+              end_s: end,
+              success:
+                typeof (item as { success?: unknown }).success === "boolean"
+                  ? ((item as { success?: boolean }).success ?? undefined)
+                  : undefined,
+              p_align:
+                typeof (item as { p_align?: unknown }).p_align === "number"
+                  ? ((item as { p_align?: number }).p_align ?? undefined)
+                  : undefined,
+            };
+          })
+          .filter((item): item is ProviderAlignedLyricWord => item !== null))
+      : [];
+
+  const alignedLinesFromProvider =
+    response && typeof response === "object" && Array.isArray((response as { aligned_lyrics?: unknown }).aligned_lyrics)
+      ? ((response as { aligned_lyrics: unknown[] }).aligned_lyrics
+          .map((item): AlignedLyricLine | null => {
+            if (!item || typeof item !== "object") {
+              return null;
+            }
+
+            const text = (item as { text?: unknown }).text;
+            const start = (item as { start_s?: unknown }).start_s;
+            const end = (item as { end_s?: unknown }).end_s;
+
+            if (typeof text !== "string" || typeof start !== "number" || typeof end !== "number") {
+              return null;
+            }
+
+            const normalizedText = text.replace(/\s+/g, " ").trim();
+            if (!normalizedText) {
+              return null;
+            }
+
+            return {
+              text: normalizedText,
+              start_s: start,
+              end_s: end,
+            };
+          })
+          .filter((item): item is AlignedLyricLine => item !== null))
+      : [];
+
+  return {
+    alignedWords,
+    alignedLines:
+      alignedLinesFromProvider.length > 0 ? alignedLinesFromProvider : buildAlignedLyricLines(alignedWords),
+  };
 }
 
 

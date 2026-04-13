@@ -10,20 +10,22 @@ import {
   type Video,
 } from "@prisma/client";
 import { db } from "@/lib/db";
-import { buildAlignedLyricLines } from "./aligned-lyrics";
 import { syncMusicCoverImageAsset, syncMusicMetadataAssets } from "./asset-storage";
+import { ensureMusicMaterialsReady } from "./finalize";
+import { renderMusicVideo } from "./video-render";
 import { createMusicSchema, type CreateMusicRequest } from "./schema";
 import {
   createMusicWithProvider,
-  getAlignedLyricsFromProvider,
+  getAlignedLyricDataFromProvider,
   getMusicStatusFromProvider,
 } from "./provider";
 import { toMusicItem } from "./mapper";
 
 const GENERATION_CONCURRENCY = 5;
 const POLL_CONCURRENCY = 5;
-const VIDEO_CONCURRENCY = 5;
+const VIDEO_CONCURRENCY = 1;
 const DEFAULT_POLL_DELAY_MS = 5 * 60 * 1000;
+const VIDEO_POLL_DELAY_MS = 20 * 1000;
 const STALE_LOCK_MS = 10 * 60 * 1000;
 
 function toNullableInputJson(value: Prisma.JsonValue | null | undefined) {
@@ -139,7 +141,7 @@ async function schedulePollJob(baseJob: GenerationJob, musicId: string, provider
       queueStatus: QueueStatus.QUEUED,
       priority: baseJob.priority,
       maxAttempts: 6,
-      runAfter: nextRunAfter(),
+      runAfter: nextRunAfter(VIDEO_POLL_DELAY_MS),
       providerTaskId,
       payload: toNullableInputJson(baseJob.payload),
     },
@@ -319,8 +321,12 @@ async function processPollJob(job: GenerationJob) {
     });
 
     if (hasStableAsset) {
-      const alignedWords = await getAlignedLyricsFromProvider(job.providerTaskId).catch(() => []);
-      const alignedLines = alignedWords.length > 0 ? buildAlignedLyricLines(alignedWords) : [];
+      const { alignedWords, alignedLines } = await getAlignedLyricDataFromProvider(job.providerTaskId).catch(
+        () => ({
+          alignedWords: [],
+          alignedLines: [],
+        }),
+      );
 
       await Promise.all([
         syncMusicMetadataAssets({
@@ -369,7 +375,7 @@ async function processPollJob(job: GenerationJob) {
       data: {
         queueStatus: QueueStatus.QUEUED,
         attemptCount: nextAttempt,
-        runAfter: nextRunAfter(),
+        runAfter: nextRunAfter(VIDEO_POLL_DELAY_MS),
         lastCheckedAt: new Date(),
         result: toInputJson(providerState),
         lockedAt: null,
@@ -390,7 +396,7 @@ async function processPollJob(job: GenerationJob) {
           queueStatus: QueueStatus.QUEUED,
           attemptCount: nextAttempt,
           errorMessage: message,
-          runAfter: nextRunAfter(),
+          runAfter: nextRunAfter(VIDEO_POLL_DELAY_MS),
           lastCheckedAt: new Date(),
           lockedAt: null,
           lockedBy: null,
@@ -427,67 +433,7 @@ async function processVideoRenderJob(job: GenerationJob) {
     return { jobId: job.id, status: "failed", reason: "video_not_found" };
   }
 
-  const music = video.music as Music;
-
-  if (!music.providerTaskId) {
-    await db.video.update({
-      where: { id: video.id },
-      data: {
-        status: VideoStatus.FAILED,
-        errorMessage: "Music provider task id is missing.",
-      },
-    });
-    await failJob(job.id, "Music provider task id is missing.");
-    return { jobId: job.id, status: "failed", reason: "provider_task_missing" };
-  }
-
   try {
-    const [providerState] = await getMusicStatusFromProvider([music.providerTaskId]);
-
-    if (!providerState) {
-      throw new Error("Provider did not return status for video task.");
-    }
-
-    const nextAttempt = job.attemptCount + 1;
-    const videoUrl = providerState.videoUrl ?? music.videoUrl;
-
-    await db.music.update({
-      where: { id: music.id },
-      data: {
-        videoUrl,
-        rawStatus: providerState.status,
-        rawResponse: toInputJson(providerState),
-      },
-    });
-
-    if (videoUrl) {
-      const completed = await db.video.update({
-        where: { id: video.id },
-        data: {
-          mp4Url: videoUrl,
-          bgImageUrl: providerState.imageLargeUrl ?? providerState.imageUrl ?? music.imageUrl,
-          status: VideoStatus.COMPLETED,
-          errorMessage: null,
-        },
-      });
-
-      await completeJob(job.id, providerState);
-      return { jobId: job.id, status: "completed", item: completed };
-    }
-
-    if (nextAttempt >= job.maxAttempts) {
-      const message = "Video did not become available before retry limit.";
-      await db.video.update({
-        where: { id: video.id },
-        data: {
-          status: VideoStatus.FAILED,
-          errorMessage: message,
-        },
-      });
-      await failJob(job.id, message);
-      return { jobId: job.id, status: "failed", reason: "video_timeout" };
-    }
-
     await db.video.update({
       where: { id: video.id },
       data: {
@@ -496,42 +442,45 @@ async function processVideoRenderJob(job: GenerationJob) {
       },
     });
 
-    await db.generationJob.update({
-      where: { id: job.id },
+    const materials = await ensureMusicMaterialsReady(video.music.id);
+
+    if (!materials?.mp3AssetPath || !materials.coverAssetPath) {
+      throw new Error("Video render materials are not ready.");
+    }
+
+    const rendered = await renderMusicVideo({
+      musicId: video.music.id,
+      title: materials.titleText,
+      mp3Path: materials.mp3AssetPath,
+      coverPath: materials.coverAssetPath,
+      lyricLines: materials.lyricLines,
+    });
+
+    const completed = await db.video.update({
+      where: { id: video.id },
       data: {
-        queueStatus: QueueStatus.QUEUED,
-        attemptCount: nextAttempt,
-        runAfter: nextRunAfter(),
-        lastCheckedAt: new Date(),
-        result: toInputJson(providerState),
-        lockedAt: null,
-        lockedBy: null,
-        startedAt: null,
+        mp4Url: rendered.outputPath,
+        bgImageUrl: materials.coverAssetPath,
+        srtUrl: rendered.srtPath,
+        status: VideoStatus.COMPLETED,
+        errorMessage: null,
       },
     });
 
-    return { jobId: job.id, status: "requeued", reason: "video_pending" };
+    await db.music.update({
+      where: { id: video.music.id },
+      data: {
+        videoUrl: rendered.outputPath,
+      },
+    });
+
+    await completeJob(job.id, {
+      mp4Url: rendered.outputPath,
+      srtUrl: rendered.srtPath,
+    });
+    return { jobId: job.id, status: "completed", item: completed };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Video render poll failed.";
-    const nextAttempt = job.attemptCount + 1;
-
-    if (nextAttempt < job.maxAttempts) {
-      await db.generationJob.update({
-        where: { id: job.id },
-        data: {
-          queueStatus: QueueStatus.QUEUED,
-          attemptCount: nextAttempt,
-          errorMessage: message,
-          runAfter: nextRunAfter(),
-          lastCheckedAt: new Date(),
-          lockedAt: null,
-          lockedBy: null,
-          startedAt: null,
-        },
-      });
-
-      return { jobId: job.id, status: "requeued", reason: message };
-    }
+    const message = error instanceof Error ? error.message : "Video render failed.";
 
     await db.video.update({
       where: { id: video.id },

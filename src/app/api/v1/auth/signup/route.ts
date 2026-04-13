@@ -1,10 +1,15 @@
 import bcrypt from "bcryptjs";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { AUTH_COOKIE_NAME, buildSessionCookieOptions, createSessionToken } from "@/lib/auth";
 import { buildCorsHeaders } from "@/lib/http";
 import { signupSchema } from "@/server/auth/schema";
 import { toPublicUser } from "@/server/auth/user";
+import {
+  buildEmailVerificationUrl,
+  createEmailVerificationToken,
+  isEmailVerificationConfigured,
+  sendVerificationEmail,
+} from "@/server/email/verification";
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +35,13 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (!isEmailVerificationConfigured()) {
+    return NextResponse.json(
+      { error: "Email verification is not configured." },
+      { status: 503, headers: corsHeaders },
+    );
+  }
+
   const passwordHash = await bcrypt.hash(parsed.data.password, 10);
   const user = await db.user.create({
     data: {
@@ -39,24 +51,35 @@ export async function POST(request: NextRequest) {
     },
   });
 
-  const token = await createSessionToken({
-    id: user.id,
-    email: user.email,
-    role: user.role,
-  });
+  const verification = await createEmailVerificationToken(user.id);
+  const verifyUrl = buildEmailVerificationUrl(verification.rawToken, request.nextUrl.searchParams.get("next"));
 
-  const response = NextResponse.json(
-    { user: toPublicUser(user) },
+  try {
+    await sendVerificationEmail({
+      toEmail: user.email,
+      name: user.name,
+      verifyUrl,
+    });
+  } catch (error) {
+    await db.user.delete({ where: { id: user.id } }).catch(() => null);
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error ? error.message : "Verification email could not be sent.",
+      },
+      { status: 500, headers: corsHeaders },
+    );
+  }
+
+  return NextResponse.json(
+    {
+      user: toPublicUser(user),
+      requiresEmailVerification: true,
+      message: "Verification email sent. Please verify your email before logging in.",
+      verificationExpiresAt: verification.expiresAt.toISOString(),
+    },
     { status: 201, headers: corsHeaders },
   );
-
-  response.cookies.set({
-    name: AUTH_COOKIE_NAME,
-    value: token,
-    ...buildSessionCookieOptions(60 * 60 * 24 * 7),
-  });
-
-  return response;
 }
 
 export async function OPTIONS(request: NextRequest) {

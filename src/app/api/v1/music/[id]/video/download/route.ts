@@ -1,4 +1,7 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+﻿import { access } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
+import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { buildCorsHeaders } from "@/lib/http";
@@ -19,6 +22,21 @@ type RouteContext = {
     id: string;
   };
 };
+
+async function getLocalVideoResponse(storagePath: string) {
+  try {
+    await access(storagePath);
+    return new Response(Readable.toWeb(createReadStream(storagePath)) as ReadableStream<Uint8Array>, {
+      status: 200,
+      headers: {
+        "Content-Type": "video/mp4",
+        "Cache-Control": "private, no-store",
+      },
+    });
+  } catch {
+    return null;
+  }
+}
 
 async function fetchDownloadStream(url: string) {
   const response = await fetch(url, {
@@ -68,6 +86,16 @@ export async function GET(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: "Video is not ready yet." }, { status: 409, headers: buildCorsHeaders(request) });
   }
 
+  if (!/^https?:\/\//i.test(video.mp4Url)) {
+    const local = await getLocalVideoResponse(video.mp4Url);
+    if (local) {
+      const fileName = `${sanitizeFilenamePart(music.title || "video")}.mp4`;
+      const fallbackFileName = "video.mp4";
+      local.headers.set("Content-Disposition", encodeDispositionFilename(fileName, fallbackFileName));
+      return local;
+    }
+  }
+
   const upstream = await fetchDownloadStream(video.mp4Url);
   if (!upstream) {
     return NextResponse.json({ error: "Failed to fetch downloadable video." }, { status: 502, headers: buildCorsHeaders(request) });
@@ -93,4 +121,3 @@ export async function OPTIONS(request: NextRequest) {
     headers: buildCorsHeaders(request),
   });
 }
-

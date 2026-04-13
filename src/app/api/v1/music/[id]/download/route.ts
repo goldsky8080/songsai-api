@@ -1,18 +1,13 @@
 ﻿import { access } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
-import { AssetStatus, MusicAssetType, MusicStatus } from "@prisma/client";
+import { AssetStatus, MusicAssetType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { buildCorsHeaders } from "@/lib/http";
-import { buildAlignedLyricLines } from "@/server/music/aligned-lyrics";
-import {
-  syncMusicCoverImageAsset,
-  syncMusicMetadataAssets,
-  syncMusicMp3Asset,
-} from "@/server/music/asset-storage";
-import { getAlignedLyricsFromProvider, getMusicStatusFromProvider } from "@/server/music/provider";
+import { ensureMusicMaterialsReady } from "@/server/music/finalize";
+import { getMusicStatusFromProvider } from "@/server/music/provider";
 import { isDownloadReady } from "@/server/music/policy";
 
 export const dynamic = "force-dynamic";
@@ -30,37 +25,8 @@ function buildAsciiFallbackFileName(extension: string) {
   return `music${extension}`;
 }
 
-function toDbMusicStatus(status: "queued" | "processing" | "completed" | "failed") {
-  switch (status) {
-    case "processing":
-      return MusicStatus.PROCESSING;
-    case "completed":
-      return MusicStatus.COMPLETED;
-    case "failed":
-      return MusicStatus.FAILED;
-    case "queued":
-    default:
-      return MusicStatus.QUEUED;
-  }
-}
-
 function encodeDispositionFilename(fileName: string, fallbackName: string, disposition: "attachment" | "inline") {
   return `${disposition}; filename="${fallbackName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
-}
-
-function parseDuration(value: string | number | null | undefined) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.round(value);
-  }
-
-  if (typeof value === "string") {
-    const parsed = Number.parseFloat(value);
-    if (Number.isFinite(parsed)) {
-      return Math.round(parsed);
-    }
-  }
-
-  return null;
 }
 
 type RouteContext = {
@@ -69,10 +35,7 @@ type RouteContext = {
   };
 };
 
-async function getLocalAssetStream(
-  storagePath: string,
-  contentType: string | null,
-): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string | null } | null> {
+async function getLocalAssetStream(storagePath: string, contentType: string | null) {
   try {
     await access(storagePath);
     return {
@@ -149,7 +112,6 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
     if (music.providerTaskId && (!music.mp3Url || !music.title || !music.imageUrl)) {
       const [providerState] = await getMusicStatusFromProvider([music.providerTaskId]).catch(() => []);
-
       if (providerState) {
         const refreshedMusic = await db.music.update({
           where: { id: music.id },
@@ -157,13 +119,11 @@ export async function GET(request: NextRequest, context: RouteContext) {
             title: providerState.title?.trim() || music.title,
             mp3Url: providerState.mp3Url ?? music.mp3Url,
             imageUrl: providerState.imageUrl ?? music.imageUrl,
-            videoUrl: providerState.videoUrl ?? music.videoUrl,
             rawStatus: providerState.status,
             rawResponse: providerState,
-            duration: parseDuration(providerState.duration) ?? music.duration,
+            duration: music.duration,
             tags: providerState.tags ?? music.tags,
             errorMessage: providerState.errorMessage ?? null,
-            status: providerState.status === "failed" ? MusicStatus.FAILED : music.status,
           },
         });
 
@@ -181,75 +141,17 @@ export async function GET(request: NextRequest, context: RouteContext) {
     return NextResponse.redirect(previewUrl, { status: 307, headers: buildCorsHeaders(request) });
   }
 
-  let currentMusic = music;
-
-  if (music.providerTaskId) {
-    const [providerState] = await getMusicStatusFromProvider([music.providerTaskId]).catch(() => []);
-
-    if (providerState) {
-      const alignedWords = await getAlignedLyricsFromProvider(music.providerTaskId).catch(() => []);
-      const alignedLines = alignedWords.length > 0 ? buildAlignedLyricLines(alignedWords) : [];
-
-      currentMusic = await db.music.update({
-        where: { id: music.id },
-        data: {
-          title: providerState.title?.trim() || music.title,
-          status:
-            providerState.status === "completed" && providerState.mp3Url
-              ? MusicStatus.COMPLETED
-              : toDbMusicStatus(providerState.status),
-          mp3Url: providerState.mp3Url ?? music.mp3Url,
-          imageUrl: providerState.imageUrl ?? music.imageUrl,
-          videoUrl: providerState.videoUrl ?? music.videoUrl,
-          rawStatus: providerState.status,
-          rawResponse: providerState,
-          duration: parseDuration(providerState.duration) ?? music.duration,
-          tags: providerState.tags ?? music.tags,
-          errorMessage: providerState.errorMessage ?? null,
-        },
-        include: {
-          assets: {
-            where: {
-              assetType: MusicAssetType.MP3,
-              status: AssetStatus.READY,
-            },
-            orderBy: {
-              updatedAt: "desc",
-            },
-            take: 1,
-          },
-        },
-      });
-
-      await syncMusicMetadataAssets({
-        musicId: music.id,
-        alignedWords,
-        alignedLines,
-        titleText: providerState.title ?? currentMusic.title ?? null,
-      });
-      await syncMusicCoverImageAsset({
-        musicId: music.id,
-        sourceUrl: providerState.imageUrl ?? currentMusic.imageUrl ?? null,
-      });
-    }
+  const materials = await ensureMusicMaterialsReady(music.id);
+  if (!materials) {
+    return NextResponse.json({ error: "Music not found" }, { status: 404, headers: buildCorsHeaders(request) });
   }
 
-  const fileName = buildDownloadFileName(currentMusic.title, ".mp3");
+  const fileName = buildDownloadFileName(materials.titleText, ".mp3");
   const fallbackFileName = buildAsciiFallbackFileName(".mp3");
   const dispositionType = isInlinePlayback ? "inline" : "attachment";
 
-  let localAsset: (typeof currentMusic.assets)[number] | Awaited<ReturnType<typeof syncMusicMp3Asset>> | null = currentMusic.assets[0] ?? null;
-
-  if (!localAsset && currentMusic.mp3Url) {
-    localAsset = await syncMusicMp3Asset({
-      musicId: currentMusic.id,
-      sourceUrl: currentMusic.mp3Url,
-    });
-  }
-
-  if (localAsset?.storagePath) {
-    const localStream = await getLocalAssetStream(localAsset.storagePath, localAsset.mimeType ?? "audio/mpeg");
-
+  if (materials.mp3AssetPath) {
+    const localStream = await getLocalAssetStream(materials.mp3AssetPath, "audio/mpeg");
     if (localStream) {
       return new Response(localStream.stream, {
         status: 200,
@@ -263,7 +165,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
     }
   }
 
-  if (!currentMusic.mp3Url) {
+  if (!materials.music.mp3Url) {
     return NextResponse.json(
       { error: "Track is not ready for download yet." },
       { status: 409, headers: buildCorsHeaders(request) },
@@ -271,10 +173,10 @@ export async function GET(request: NextRequest, context: RouteContext) {
   }
 
   if (isInlinePlayback) {
-    return NextResponse.redirect(currentMusic.mp3Url, { status: 307, headers: buildCorsHeaders(request) });
+    return NextResponse.redirect(materials.music.mp3Url, { status: 307, headers: buildCorsHeaders(request) });
   }
 
-  const upstream = await fetchDownloadStream(currentMusic.mp3Url);
+  const upstream = await fetchDownloadStream(materials.music.mp3Url);
   if (!upstream) {
     return NextResponse.json(
       { error: "Failed to fetch downloadable track." },
@@ -299,5 +201,3 @@ export async function OPTIONS(request: NextRequest) {
     headers: buildCorsHeaders(request),
   });
 }
-
-

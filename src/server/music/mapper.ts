@@ -103,4 +103,3 @@ export function toRecentMusicItem(music: Music): RecentMusicItem {
     tags: null,
   };
 }
-

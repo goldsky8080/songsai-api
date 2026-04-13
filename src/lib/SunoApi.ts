@@ -1332,18 +1332,12 @@ class SunoApi {
    * @param song_id The ID of the song to get the lyric alignment for.
    * @returns A promise that resolves to an object containing the lyric alignment.
    */
-  public async getLyricAlignment(song_id: string): Promise<object> {
+  public async getLyricAlignment(song_id: string): Promise<any> {
     await this.keepAlive(false);
     const response = await this.client.get(`${SunoApi.BASE_URL}/api/gen/${song_id}/aligned_lyrics/v2/`);
 
     console.log(`getLyricAlignment ~ response:`, response.data);
-    return response.data?.aligned_words.map((transcribedWord: any) => ({
-      word: transcribedWord.word,
-      start_s: transcribedWord.start_s,
-      end_s: transcribedWord.end_s,
-      success: transcribedWord.success,
-      p_align: transcribedWord.p_align
-    }));
+    return response.data;
   }
 
   /**

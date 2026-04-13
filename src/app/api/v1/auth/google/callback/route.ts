@@ -131,6 +131,7 @@ export async function GET(request: NextRequest) {
           googleId: userInfo.sub,
           name: existingUser.name ?? userInfo.name,
           profileImage: existingUser.profileImage ?? userInfo.picture,
+          emailVerifiedAt: existingUser.emailVerifiedAt ?? new Date(),
         },
       });
     }
@@ -142,6 +143,7 @@ export async function GET(request: NextRequest) {
         passwordHash: `google-oauth:${randomUUID()}`,
         name: userInfo.name,
         profileImage: userInfo.picture,
+        emailVerifiedAt: new Date(),
       },
     });
   });
