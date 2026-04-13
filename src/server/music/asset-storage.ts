@@ -1,4 +1,4 @@
-import { access, mkdir, writeFile } from "node:fs/promises";
+﻿import { access, mkdir, writeFile } from "node:fs/promises";
 import { AssetStatus, MusicAssetType } from "@prisma/client";
 import { db } from "@/lib/db";
 import type { AlignedLyricLine } from "@/server/music/aligned-lyrics";
@@ -48,6 +48,45 @@ function getImageExtension(contentType: string | null, sourceUrl: string) {
   }
 
   return ".jpg";
+}
+function getAudioExtension(contentType: string | null, sourceUrl: string) {
+  const normalized = contentType?.split(";")[0].trim().toLowerCase() ?? "";
+
+  if (normalized === "audio/mpeg" || normalized === "audio/mp3") {
+    return ".mp3";
+  }
+
+  if (normalized === "audio/wav" || normalized === "audio/x-wav" || normalized === "audio/wave") {
+    return ".wav";
+  }
+
+  if (normalized === "audio/mp4" || normalized === "audio/x-m4a") {
+    return ".m4a";
+  }
+
+  if (normalized === "audio/aac") {
+    return ".aac";
+  }
+
+  if (normalized === "audio/ogg") {
+    return ".ogg";
+  }
+
+  if (normalized === "audio/webm") {
+    return ".webm";
+  }
+
+  try {
+    const pathname = new URL(sourceUrl).pathname;
+    const match = pathname.match(/\.(mp3|wav|m4a|aac|ogg|webm)$/i);
+    if (match) {
+      return match[0].toLowerCase();
+    }
+  } catch {
+    // ignore URL parsing issues and fall back to mp3
+  }
+
+  return ".mp3";
 }
 
 async function saveJsonFile(params: {
@@ -164,6 +203,82 @@ async function upsertFailedAsset(params: {
   );
 }
 
+export async function syncMusicMp3Asset(params: {
+  musicId: string;
+  sourceUrl?: string | null;
+}) {
+  const sourceUrl = params.sourceUrl?.trim();
+  if (!sourceUrl) {
+    return null;
+  }
+
+  await ensureAssetDirs();
+
+  const existing = await db.musicAsset.findUnique({
+    where: {
+      musicId_assetType: {
+        musicId: params.musicId,
+        assetType: MusicAssetType.MP3,
+      },
+    },
+  });
+
+  if (existing?.status === AssetStatus.READY && existing.storagePath) {
+    try {
+      await access(existing.storagePath);
+      return existing;
+    } catch {
+      // fall through to refresh the cached file
+    }
+  }
+
+  try {
+    const response = await fetch(sourceUrl, {
+      cache: "no-store",
+      redirect: "follow",
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch mp3 asset: ${response.status}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    const mimeType = response.headers.get("content-type")?.split(";")[0].trim() || "audio/mpeg";
+    const extension = getAudioExtension(mimeType, sourceUrl);
+    const stored = await saveBinaryFile({
+      musicId: params.musicId,
+      assetType: MusicAssetType.MP3,
+      bytes,
+      extension,
+      mimeType,
+    });
+
+    return db.musicAsset.upsert(
+      buildMusicAssetUpsertData({
+        musicId: params.musicId,
+        assetType: MusicAssetType.MP3,
+        storageTier: stored.storageTier,
+        sourceUrl,
+        storageKey: stored.storageKey,
+        storagePath: stored.storagePath,
+        publicUrl: stored.publicUrl,
+        mimeType: stored.mimeType,
+        fileSize: stored.fileSize,
+        status: AssetStatus.READY,
+        errorMessage: null,
+      }),
+    );
+  } catch (error) {
+    await upsertFailedAsset({
+      musicId: params.musicId,
+      assetType: MusicAssetType.MP3,
+      sourceUrl,
+      errorMessage: error instanceof Error ? error.message : "Failed to cache mp3 asset.",
+    });
+    return null;
+  }
+}
 export async function syncMusicCoverImageAsset(params: {
   musicId: string;
   sourceUrl?: string | null;
@@ -350,3 +465,4 @@ export async function syncMusicMetadataAssets(params: {
     }
   }
 }
+

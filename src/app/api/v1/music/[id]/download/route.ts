@@ -6,9 +6,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { buildCorsHeaders } from "@/lib/http";
-import { getAlignedLyricsFromProvider, getMusicStatusFromProvider } from "@/server/music/provider";
 import { buildAlignedLyricLines } from "@/server/music/aligned-lyrics";
-import { syncMusicMetadataAssets } from "@/server/music/asset-storage";
+import {
+  syncMusicCoverImageAsset,
+  syncMusicMetadataAssets,
+  syncMusicMp3Asset,
+} from "@/server/music/asset-storage";
+import { getAlignedLyricsFromProvider, getMusicStatusFromProvider } from "@/server/music/provider";
 import { isDownloadReady } from "@/server/music/policy";
 
 export const dynamic = "force-dynamic";
@@ -40,8 +44,23 @@ function toDbMusicStatus(status: "queued" | "processing" | "completed" | "failed
   }
 }
 
-function encodeDispositionFilename(fileName: string, fallbackName: string) {
-  return `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+function encodeDispositionFilename(fileName: string, fallbackName: string, disposition: "attachment" | "inline") {
+  return `${disposition}; filename="${fallbackName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+}
+
+function parseDuration(value: string | number | null | undefined) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.round(value);
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed)) {
+      return Math.round(parsed);
+    }
+  }
+
+  return null;
 }
 
 type RouteContext = {
@@ -56,7 +75,6 @@ async function getLocalAssetStream(
 ): Promise<{ stream: ReadableStream<Uint8Array>; contentType: string | null } | null> {
   try {
     await access(storagePath);
-
     return {
       stream: Readable.toWeb(createReadStream(storagePath)) as ReadableStream<Uint8Array>,
       contentType,
@@ -113,14 +131,54 @@ export async function GET(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: "Music not found" }, { status: 404, headers: buildCorsHeaders(request) });
   }
 
-  if (!isDownloadReady(music.createdAt)) {
-    return NextResponse.json(
-      {
-        error: "Download is not available yet.",
-        downloadAvailableAt: new Date(music.createdAt.getTime() + 5 * 60 * 1000).toISOString(),
-      },
-      { status: 409, headers: buildCorsHeaders(request) },
-    );
+  const isInlinePlayback = request.nextUrl.searchParams.get("inline") === "1";
+  const isReady = isDownloadReady(music.createdAt);
+
+  if (!isReady) {
+    if (!isInlinePlayback) {
+      return NextResponse.json(
+        {
+          error: "Download is not available yet.",
+          downloadAvailableAt: new Date(music.createdAt.getTime() + 5 * 60 * 1000).toISOString(),
+        },
+        { status: 409, headers: buildCorsHeaders(request) },
+      );
+    }
+
+    let previewUrl = music.mp3Url ?? null;
+
+    if (music.providerTaskId && (!music.mp3Url || !music.title || !music.imageUrl)) {
+      const [providerState] = await getMusicStatusFromProvider([music.providerTaskId]).catch(() => []);
+
+      if (providerState) {
+        const refreshedMusic = await db.music.update({
+          where: { id: music.id },
+          data: {
+            title: providerState.title?.trim() || music.title,
+            mp3Url: providerState.mp3Url ?? music.mp3Url,
+            imageUrl: providerState.imageUrl ?? music.imageUrl,
+            videoUrl: providerState.videoUrl ?? music.videoUrl,
+            rawStatus: providerState.status,
+            rawResponse: providerState,
+            duration: parseDuration(providerState.duration) ?? music.duration,
+            tags: providerState.tags ?? music.tags,
+            errorMessage: providerState.errorMessage ?? null,
+            status: providerState.status === "failed" ? MusicStatus.FAILED : music.status,
+          },
+        });
+
+        previewUrl = refreshedMusic.mp3Url ?? previewUrl;
+      }
+    }
+
+    if (!previewUrl) {
+      return NextResponse.json(
+        { error: "Preview URL is not ready yet." },
+        { status: 409, headers: buildCorsHeaders(request) },
+      );
+    }
+
+    return NextResponse.redirect(previewUrl, { status: 307, headers: buildCorsHeaders(request) });
   }
 
   let currentMusic = music;
@@ -135,6 +193,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
       currentMusic = await db.music.update({
         where: { id: music.id },
         data: {
+          title: providerState.title?.trim() || music.title,
           status:
             providerState.status === "completed" && providerState.mp3Url
               ? MusicStatus.COMPLETED
@@ -144,6 +203,8 @@ export async function GET(request: NextRequest, context: RouteContext) {
           videoUrl: providerState.videoUrl ?? music.videoUrl,
           rawStatus: providerState.status,
           rawResponse: providerState,
+          duration: parseDuration(providerState.duration) ?? music.duration,
+          tags: providerState.tags ?? music.tags,
           errorMessage: providerState.errorMessage ?? null,
         },
         include: {
@@ -164,15 +225,28 @@ export async function GET(request: NextRequest, context: RouteContext) {
         musicId: music.id,
         alignedWords,
         alignedLines,
-        titleText: currentMusic.title ?? null,
+        titleText: providerState.title ?? currentMusic.title ?? null,
+      });
+      await syncMusicCoverImageAsset({
+        musicId: music.id,
+        sourceUrl: providerState.imageUrl ?? currentMusic.imageUrl ?? null,
       });
     }
   }
 
   const fileName = buildDownloadFileName(currentMusic.title, ".mp3");
   const fallbackFileName = buildAsciiFallbackFileName(".mp3");
+  const dispositionType = isInlinePlayback ? "inline" : "attachment";
 
-  const localAsset = currentMusic.assets[0] ?? null;
+  let localAsset: (typeof currentMusic.assets)[number] | Awaited<ReturnType<typeof syncMusicMp3Asset>> | null = currentMusic.assets[0] ?? null;
+
+  if (!localAsset && currentMusic.mp3Url) {
+    localAsset = await syncMusicMp3Asset({
+      musicId: currentMusic.id,
+      sourceUrl: currentMusic.mp3Url,
+    });
+  }
+
   if (localAsset?.storagePath) {
     const localStream = await getLocalAssetStream(localAsset.storagePath, localAsset.mimeType ?? "audio/mpeg");
 
@@ -182,7 +256,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
         headers: {
           ...buildCorsHeaders(request),
           "Content-Type": localStream.contentType ?? "audio/mpeg",
-          "Content-Disposition": encodeDispositionFilename(fileName, fallbackFileName),
+          "Content-Disposition": encodeDispositionFilename(fileName, fallbackFileName, dispositionType),
           "Cache-Control": "private, no-store",
         },
       });
@@ -194,6 +268,10 @@ export async function GET(request: NextRequest, context: RouteContext) {
       { error: "Track is not ready for download yet." },
       { status: 409, headers: buildCorsHeaders(request) },
     );
+  }
+
+  if (isInlinePlayback) {
+    return NextResponse.redirect(currentMusic.mp3Url, { status: 307, headers: buildCorsHeaders(request) });
   }
 
   const upstream = await fetchDownloadStream(currentMusic.mp3Url);
@@ -209,7 +287,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
     headers: {
       ...buildCorsHeaders(request),
       "Content-Type": upstream.contentType ?? "audio/mpeg",
-      "Content-Disposition": encodeDispositionFilename(fileName, fallbackFileName),
+      "Content-Disposition": encodeDispositionFilename(fileName, fallbackFileName, dispositionType),
       "Cache-Control": "private, no-store",
     },
   });
@@ -221,4 +299,5 @@ export async function OPTIONS(request: NextRequest) {
     headers: buildCorsHeaders(request),
   });
 }
+
 

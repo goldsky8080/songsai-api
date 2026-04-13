@@ -1,4 +1,4 @@
-import { MusicStatus, VideoStatus, type Music, type Video } from "@prisma/client";
+﻿import { MusicStatus, VideoStatus, type Music, type Video } from "@prisma/client";
 import { getDownloadAvailableAt, isDownloadReady } from "./policy";
 import type { MusicItem, PublicMusicStatus, RecentMusicItem } from "./types";
 
@@ -11,7 +11,7 @@ function hasUsableMediaUrl(value: string | null | undefined) {
 }
 
 function getMusicTitle(music: Music) {
-  return music.title?.trim() || "제목 없는 곡";
+  return music.title?.trim() || "제목 생성 대기 중";
 }
 
 function resolveMusicImageUrl(music: Music) {
@@ -103,3 +103,4 @@ export function toRecentMusicItem(music: Music): RecentMusicItem {
     tags: null,
   };
 }
+

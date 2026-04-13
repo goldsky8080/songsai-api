@@ -327,7 +327,7 @@ async function processPollJob(job: GenerationJob) {
           musicId: music.id,
           alignedWords,
           alignedLines,
-          titleText: music.title ?? null,
+          titleText: providerState.title ?? music.title ?? null,
         }),
         syncMusicCoverImageAsset({
           musicId: music.id,
@@ -569,3 +569,4 @@ export async function runMusicWorker(workerId: string) {
     finishedAt: new Date().toISOString(),
   };
 }
+

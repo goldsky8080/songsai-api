@@ -39,7 +39,7 @@ export async function createMusicWithProvider(input: CreateMusicRequest): Promis
   const audioInfo = await (await sunoApi(getEnv().SUNO_COOKIE)).custom_generate(
     input.lyrics ?? "",
     input.stylePrompt,
-    input.title,
+    input.title?.trim() ? input.title.trim() : undefined,
     Boolean(input.isMr),
     resolvedModel || DEFAULT_MODEL,
     false,
@@ -60,6 +60,7 @@ export async function createMusicWithProvider(input: CreateMusicRequest): Promis
     .filter((item) => Boolean(item.id))
     .map((item) => ({
       providerTaskId: item.id,
+      title: item.title,
       status: normalizeProviderStatus(item.status),
       mp3Url: item.audio_url,
       videoUrl: item.video_url,
@@ -67,6 +68,8 @@ export async function createMusicWithProvider(input: CreateMusicRequest): Promis
       generatedLyrics: item.lyric,
       providerPrompt: item.prompt,
       providerDescriptionPrompt: item.gpt_description_prompt,
+      tags: item.tags,
+      duration: item.duration,
     }));
 
   const primaryTrack = tracks[0];
@@ -77,6 +80,7 @@ export async function createMusicWithProvider(input: CreateMusicRequest): Promis
 
   return {
     providerTaskId: tracks.map((track) => track.providerTaskId).join(","),
+    title: primaryTrack.title,
     status: primaryTrack.status,
     mp3Url: primaryTrack.mp3Url,
     videoUrl: primaryTrack.videoUrl,
@@ -84,6 +88,8 @@ export async function createMusicWithProvider(input: CreateMusicRequest): Promis
     generatedLyrics: primaryTrack.generatedLyrics,
     providerPrompt: primaryTrack.providerPrompt,
     providerDescriptionPrompt: primaryTrack.providerDescriptionPrompt,
+    tags: primaryTrack.tags,
+    duration: primaryTrack.duration,
     tracks,
   };
 }
@@ -91,6 +97,7 @@ export async function createMusicWithProvider(input: CreateMusicRequest): Promis
 function mapAudioInfoToProviderTrack(item: AudioInfo) {
   return {
     providerTaskId: item.id,
+    title: item.title,
     status: normalizeProviderStatus(item.status),
     mp3Url: item.audio_url,
     videoUrl: item.video_url,
@@ -98,6 +105,8 @@ function mapAudioInfoToProviderTrack(item: AudioInfo) {
     generatedLyrics: item.lyric,
     providerPrompt: item.prompt,
     providerDescriptionPrompt: item.gpt_description_prompt,
+    tags: item.tags,
+    duration: item.duration,
   };
 }
 
@@ -115,6 +124,7 @@ export async function getMusicStatusFromProvider(
 
     return {
       providerTaskId: mapped.providerTaskId,
+      title: mapped.title,
       status: mapped.status,
       mp3Url: mapped.mp3Url,
       videoUrl: mapped.videoUrl,
@@ -122,6 +132,8 @@ export async function getMusicStatusFromProvider(
       generatedLyrics: mapped.generatedLyrics,
       providerPrompt: mapped.providerPrompt,
       providerDescriptionPrompt: mapped.providerDescriptionPrompt,
+      tags: mapped.tags,
+      duration: mapped.duration,
       errorMessage: item.error_message,
       tracks: [mapped],
     } satisfies ProviderMusicResult;
@@ -172,3 +184,5 @@ export async function getAlignedLyricsFromProvider(
 
   return mapped.filter((item): item is ProviderAlignedLyricWord => item !== null);
 }
+
+

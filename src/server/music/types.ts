@@ -10,7 +10,7 @@ export type ProviderAlignedLyricWord = {
 
 export type CreateMusicInput = {
   userId: string;
-  title: string;
+  title?: string;
   lyrics: string;
   stylePrompt: string;
   lyricMode?: "manual" | "auto" | "ai_lyrics";
@@ -20,8 +20,9 @@ export type CreateMusicInput = {
   modelVersion?: "v4_5_plus" | "v5" | "v5_5";
 };
 
-export type ProviderMusicResult = {
+export type ProviderMusicTrack = {
   providerTaskId: string;
+  title?: string;
   status: PublicMusicStatus;
   mp3Url?: string;
   videoUrl?: string;
@@ -30,18 +31,25 @@ export type ProviderMusicResult = {
   generatedLyrics?: string;
   providerPrompt?: string;
   providerDescriptionPrompt?: string;
+  tags?: string;
+  duration?: string;
+};
+
+export type ProviderMusicResult = {
+  providerTaskId: string;
+  title?: string;
+  status: PublicMusicStatus;
+  mp3Url?: string;
+  videoUrl?: string;
+  imageUrl?: string;
+  imageLargeUrl?: string;
+  generatedLyrics?: string;
+  providerPrompt?: string;
+  providerDescriptionPrompt?: string;
+  tags?: string;
+  duration?: string;
   errorMessage?: string;
-  tracks?: Array<{
-    providerTaskId: string;
-    status: PublicMusicStatus;
-    mp3Url?: string;
-    videoUrl?: string;
-    imageUrl?: string;
-    imageLargeUrl?: string;
-    generatedLyrics?: string;
-    providerPrompt?: string;
-    providerDescriptionPrompt?: string;
-  }>;
+  tracks?: ProviderMusicTrack[];
 };
 
 export type MusicTrackItem = {
@@ -60,7 +68,7 @@ export type MusicTrackItem = {
 export type MusicItem = {
   id: string;
   requestGroupId: string | null;
-  title: string;
+  title?: string;
   status: PublicMusicStatus;
   createdAt: string;
   updatedAt?: string;
@@ -89,7 +97,7 @@ export type MusicItem = {
 
 export type RecentMusicItem = {
   id: string;
-  title: string;
+  title?: string;
   status: "completed";
   createdAt: string;
   lyrics?: string | null;

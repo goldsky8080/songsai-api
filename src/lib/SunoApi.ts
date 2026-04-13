@@ -1051,7 +1051,7 @@ class SunoApi {
   public async custom_generate(
     prompt: string,
     tags: string,
-    title: string,
+    title?: string,
     make_instrumental: boolean = false,
     model?: string,
     wait_audio: boolean = false,
@@ -1133,7 +1133,9 @@ class SunoApi {
     };
     if (isCustom) {
       payload.tags = tags;
-      payload.title = title;
+      if (title) {
+        payload.title = title;
+      }
       payload.negative_tags = negative_tags;
       payload.prompt = prompt;
       if (gpt_description_prompt) {
@@ -1167,18 +1169,51 @@ class SunoApi {
         2
       )
     );
-    const response = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/v2/`,
-      payload,
-      {
-        timeout: 10000 // 10 seconds timeout
-      }
-    );
+
+    let response;
+    try {
+      response = await this.client.post(
+        `${SunoApi.BASE_URL}/api/generate/v2/`,
+        payload,
+        {
+          timeout: 10000 // 10 seconds timeout
+        }
+      );
+      logger.info(
+        'generateSongs response:\n' +
+        JSON.stringify(
+          {
+            status: response.status,
+            statusText: response.statusText,
+            data: response.data
+          },
+          null,
+          2
+        )
+      );
+    } catch (error: any) {
+      logger.error(
+        'generateSongs error:\n' +
+        JSON.stringify(
+          {
+            message: error?.message,
+            code: error?.code,
+            status: error?.response?.status,
+            statusText: error?.response?.statusText,
+            data: error?.response?.data,
+            headers: error?.response?.headers
+          },
+          null,
+          2
+        )
+      );
+      throw error;
+    }
+
     if (response.status !== 200) {
       throw new Error('Error response:' + response.statusText);
     }
     const songIds = response.data.clips.map((audio: any) => audio.id);
-    //Want to wait for music file generation
     if (wait_audio) {
       const startTime = Date.now();
       let lastResponse: AudioInfo[] = [];
@@ -1217,7 +1252,6 @@ class SunoApi {
       }));
     }
   }
-
   /**
    * Generates lyrics based on a given prompt.
    * @param prompt The prompt for generating lyrics.
@@ -1508,6 +1542,9 @@ export const sunoApi = async (cookie?: string) => {
 
   return instance;
 };
+
+
+
 
 
 
