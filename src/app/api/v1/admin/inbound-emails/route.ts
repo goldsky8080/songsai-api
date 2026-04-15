@@ -1,9 +1,9 @@
+import { InboundEmailStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
-import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
 import { buildCorsHeaders } from "@/lib/http";
-import { toPublicUser } from "@/server/auth/user";
+import { listInboundEmails } from "@/server/email/inbound";
 
 export const dynamic = "force-dynamic";
 
@@ -27,24 +27,27 @@ export async function GET(request: NextRequest) {
 
   const limitParam = Number.parseInt(request.nextUrl.searchParams.get("limit") ?? "", 10);
   const offsetParam = Number.parseInt(request.nextUrl.searchParams.get("offset") ?? "", 10);
-  const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : 50;
-  const offset = Number.isFinite(offsetParam) && offsetParam >= 0 ? offsetParam : 0;
+  const statusParam = request.nextUrl.searchParams.get("status");
 
-  const [items, total] = await Promise.all([
-    db.user.findMany({
-      orderBy: { createdAt: "desc" },
-      skip: offset,
-      take: limit,
-    }),
-    db.user.count(),
-  ]);
+  const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 100) : 30;
+  const offset = Number.isFinite(offsetParam) && offsetParam >= 0 ? offsetParam : 0;
+  const status = Object.values(InboundEmailStatus).includes(statusParam as InboundEmailStatus)
+    ? (statusParam as InboundEmailStatus)
+    : undefined;
+
+  const { items, total } = await listInboundEmails({
+    limit,
+    offset,
+    status,
+  });
 
   return NextResponse.json(
     {
-      items: items.map(toPublicUser),
+      items,
       total,
       limit,
       offset,
+      status: status ?? null,
     },
     { status: 200, headers: corsHeaders },
   );

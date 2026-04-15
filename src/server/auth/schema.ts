@@ -28,3 +28,12 @@ export const resetPasswordSchema = z.object({
   token: z.string().min(1),
   password: passwordSchema,
 });
+
+export const updateProfileSchema = z.object({
+  name: z.string().trim().min(1, "Name is required.").max(100, "Name must be 100 characters or less."),
+});
+
+export const changePasswordSchema = z.object({
+  currentPassword: passwordSchema,
+  newPassword: passwordSchema,
+});

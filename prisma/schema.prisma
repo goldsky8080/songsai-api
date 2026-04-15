@@ -68,6 +68,13 @@ enum AssetStorageTier {
   ARCHIVE
 }
 
+enum InboundEmailStatus {
+  NEW
+  READ
+  REPLIED
+  ARCHIVED
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -84,9 +91,44 @@ model User {
   updatedAt    DateTime @updatedAt
 
   musics         Music[]
+  musicLikes     MusicLike[]
   generationJobs GenerationJob[]
   emailVerificationTokens EmailVerificationToken[]
   passwordResetTokens PasswordResetToken[]
+}
+
+model InboundEmail {
+  id         String             @id @default(cuid())
+  messageId  String?            @unique
+  fromEmail  String
+  fromName   String?
+  toEmail    String
+  subject    String?
+  textBody   String?
+  htmlBody   String?
+  receivedAt DateTime           @default(now())
+  status     InboundEmailStatus @default(NEW)
+  rawPayload Json?
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+  attachments InboundEmailAttachment[]
+
+  @@index([status, receivedAt])
+  @@index([receivedAt])
+}
+
+model InboundEmailAttachment {
+  id             String   @id @default(cuid())
+  inboundEmailId String
+  filename       String
+  contentType    String?
+  size           Int?
+  storagePath    String?
+  createdAt      DateTime @default(now())
+
+  inboundEmail InboundEmail @relation(fields: [inboundEmailId], references: [id], onDelete: Cascade)
+
+  @@index([inboundEmailId, createdAt])
 }
 
 model EmailVerificationToken {
@@ -119,6 +161,7 @@ model Music {
   id             String      @id @default(cuid())
   userId         String
   requestGroupId String?
+  isPublic       Boolean     @default(true)
   title          String?
   lyrics         String
   stylePrompt    String
@@ -143,11 +186,28 @@ model Music {
   user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   assets         MusicAsset[]
   videos         Video[]
+  likes          MusicLike[]
   generationJobs GenerationJob[]
 
   @@index([userId, createdAt])
   @@index([requestGroupId, createdAt])
   @@index([status])
+  @@index([isPublic, createdAt])
+}
+
+model MusicLike {
+  id        String   @id @default(cuid())
+  musicId    String
+  userId     String
+  createdAt  DateTime @default(now())
+
+  music Music @relation(fields: [musicId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([musicId, userId])
+  @@index([musicId, createdAt])
+  @@index([userId, createdAt])
+  @@index([createdAt])
 }
 
 model MusicAsset {

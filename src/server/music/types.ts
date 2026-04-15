@@ -68,7 +68,10 @@ export type MusicTrackItem = {
 export type MusicItem = {
   id: string;
   requestGroupId: string | null;
+  isPublic?: boolean;
   title?: string;
+  artistId?: string | null;
+  artistName?: string | null;
   status: PublicMusicStatus;
   createdAt: string;
   updatedAt?: string;
@@ -92,6 +95,8 @@ export type MusicItem = {
   tags?: string | null;
   duration?: number | string | null;
   errorMessage?: string | null;
+  likeCount?: number;
+  likedByMe?: boolean;
   tracks?: MusicTrackItem[];
 };
 
