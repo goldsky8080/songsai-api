@@ -23,7 +23,7 @@ import { toMusicItem } from "./mapper";
 
 const GENERATION_CONCURRENCY = 5;
 const POLL_CONCURRENCY = 5;
-const VIDEO_CONCURRENCY = 1;
+const VIDEO_CONCURRENCY = 4;
 const DEFAULT_POLL_DELAY_MS = 5 * 60 * 1000;
 const VIDEO_POLL_DELAY_MS = 20 * 1000;
 const STALE_LOCK_MS = 10 * 60 * 1000;

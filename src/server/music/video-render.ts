@@ -8,6 +8,9 @@ const VIDEO_OUTPUT_DIR = path.join(VIDEO_ROOT, "output");
 const VIDEO_SUBTITLE_DIR = path.join(VIDEO_ROOT, "subtitles");
 const SUBTITLE_GAP_PADDING_S = 0.12;
 const TITLE_EVENT_END = "9:59:59.00";
+const VIDEO_WIDTH = 720;
+const VIDEO_HEIGHT = 1280;
+const VIDEO_FPS = 24;
 
 type SubtitleCue = {
   text: string;
@@ -115,15 +118,15 @@ async function writeAssSubtitleFile(params: {
 
   const assContent = `[Script Info]
 ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: ${VIDEO_WIDTH}
+PlayResY: ${VIDEO_HEIGHT}
 WrapStyle: 2
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Malgun Gothic,70,&H0000F6FF,&H0000F6FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,2.8,0,2,90,90,165,1
-Style: Title,Malgun Gothic,44,&H0000F6FF,&H0000F6FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,2.4,0,7,46,70,62,1
+Style: Default,Malgun Gothic,50,&H0000F6FF,&H0000F6FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,2.4,0,2,60,60,120,1
+Style: Title,Malgun Gothic,34,&H0000F6FF,&H0000F6FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,2.2,0,7,32,48,44,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -144,9 +147,9 @@ function runFfmpeg(
     const ffmpegPath = resolveFfmpegPath();
 
     const videoFilter = [
-      "scale=1280:2276:force_original_aspect_ratio=increase",
-      "crop=1280:2276",
-      "zoompan=z='if(lte(on,180),1.02+on*0.00035,if(lte(on,360),1.083-(on-180)*0.00025,1.038))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30",
+      `fps=${VIDEO_FPS}`,
+      `scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=increase`,
+      `crop=${VIDEO_WIDTH}:${VIDEO_HEIGHT}`,
       "format=yuv420p",
     ];
 
@@ -172,7 +175,7 @@ function runFfmpeg(
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        "superfast",
         "-c:a",
         "aac",
         "-b:a",
