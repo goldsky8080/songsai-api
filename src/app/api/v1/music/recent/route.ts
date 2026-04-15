@@ -11,7 +11,9 @@ export async function GET(request: NextRequest) {
 
   const musics = await db.music.findMany({
     where: {
-      status: "COMPLETED",
+      status: {
+        notIn: ["FAILED", "CANCELLED"],
+      },
       mp3Url: {
         not: null,
       },

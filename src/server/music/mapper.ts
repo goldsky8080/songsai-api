@@ -30,7 +30,7 @@ function resolveMusicImageUrl(music: Music) {
 }
 
 export function isRecentCompletedMusic(music: Music) {
-  return music.status === MusicStatus.COMPLETED && hasUsableMediaUrl(music.mp3Url) && !music.errorMessage;
+  return music.status !== MusicStatus.FAILED && music.status !== MusicStatus.CANCELLED && hasUsableMediaUrl(music.mp3Url) && !music.errorMessage;
 }
 
 export function toPublicMusicStatus(status: MusicStatus): PublicMusicStatus {
