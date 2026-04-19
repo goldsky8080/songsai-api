@@ -1,10 +1,27 @@
-import type { AudioInfo } from "@/lib/SunoApi";
+﻿import type { AudioInfo } from "@/lib/SunoApi";
 import { DEFAULT_MODEL, sunoApi } from "@/lib/SunoApi";
 import { getEnv } from "@/lib/env";
 import type { AlignedLyricLine } from "./aligned-lyrics";
 import { buildAlignedLyricLines } from "./aligned-lyrics";
 import type { CreateMusicRequest } from "./schema";
 import type { ProviderAlignedLyricWord, ProviderMusicResult } from "./types";
+
+type AceStepApiResponse = {
+  item?: Record<string, unknown>;
+  provider?: unknown;
+  providerTaskId?: unknown;
+  title?: unknown;
+  lyrics?: unknown;
+  generatedLyrics?: unknown;
+  stylePrompt?: unknown;
+  status?: unknown;
+  mp3Url?: unknown;
+  videoUrl?: unknown;
+  imageUrl?: unknown;
+  imageLargeUrl?: unknown;
+  duration?: unknown;
+  errorMessage?: unknown;
+};
 
 function resolveModelVersion(modelVersion?: "v4_5_plus" | "v5" | "v5_5") {
   if (modelVersion === "v4_5_plus") {
@@ -37,6 +54,10 @@ function normalizeProviderStatus(status?: string): ProviderMusicResult["status"]
 }
 
 export async function createMusicWithProvider(input: CreateMusicRequest): Promise<ProviderMusicResult> {
+  if (input.provider === "ace_step") {
+    return createMusicWithAceStep(input);
+  }
+
   const resolvedModel = resolveModelVersion(input.modelVersion);
   const audioInfo = await (await sunoApi(getEnv().SUNO_COOKIE)).custom_generate(
     input.lyrics ?? "",
@@ -81,6 +102,7 @@ export async function createMusicWithProvider(input: CreateMusicRequest): Promis
   }
 
   return {
+    provider: "SUNO",
     providerTaskId: tracks.map((track) => track.providerTaskId).join(","),
     title: primaryTrack.title,
     status: primaryTrack.status,
@@ -94,6 +116,103 @@ export async function createMusicWithProvider(input: CreateMusicRequest): Promis
     duration: primaryTrack.duration,
     tracks,
   };
+}
+
+async function createMusicWithAceStep(input: CreateMusicRequest): Promise<ProviderMusicResult> {
+  const env = getEnv();
+
+  if (!env.ACE_STEP_API_BASE_URL) {
+    throw new Error("ACE-Step API base URL is not configured.");
+  }
+
+  const controller = new AbortController();
+  const parsedTimeout = Number.parseInt(env.ACE_STEP_TIMEOUT_MS ?? "600000", 10);
+  const timeoutMs = Number.isFinite(parsedTimeout) ? parsedTimeout : 600000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(new URL("/api/v1/music", env.ACE_STEP_API_BASE_URL), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(env.ACE_STEP_API_KEY ? { Authorization: `Bearer ${env.ACE_STEP_API_KEY}` } : {}),
+      },
+      body: JSON.stringify({
+        title: input.title,
+        lyrics: input.lyrics,
+        stylePrompt: input.stylePrompt,
+        provider: "ace_step",
+      }),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    const payload = await parseAceStepResponse(response);
+
+    if (!response.ok) {
+      throw new Error(
+        readAceStepString(payload.errorMessage) ??
+          `ACE-Step API request failed with status ${response.status}.`,
+      );
+    }
+
+    const normalizedPayload = payload.item && typeof payload.item === "object" ? payload.item : payload;
+    const providerTaskId = readAceStepString(normalizedPayload.providerTaskId);
+
+    if (!providerTaskId) {
+      throw new Error("ACE-Step API did not return providerTaskId.");
+    }
+
+    return {
+      provider: "ACE_STEP",
+      providerTaskId,
+      title: readAceStepString(normalizedPayload.title) ?? input.title,
+      status: normalizeProviderStatus(readAceStepString(normalizedPayload.status) ?? "completed"),
+      mp3Url: readAceStepString(normalizedPayload.mp3Url) ?? undefined,
+      videoUrl: readAceStepString(normalizedPayload.videoUrl) ?? undefined,
+      imageUrl: readAceStepString(normalizedPayload.imageUrl) ?? undefined,
+      imageLargeUrl: readAceStepString(normalizedPayload.imageLargeUrl) ?? undefined,
+      generatedLyrics:
+        readAceStepString(normalizedPayload.generatedLyrics) ??
+        readAceStepString(normalizedPayload.lyrics) ??
+        input.lyrics,
+      providerPrompt: readAceStepString(normalizedPayload.stylePrompt) ?? input.stylePrompt,
+      duration: readAceStepDuration(normalizedPayload.duration),
+      errorMessage: readAceStepString(normalizedPayload.errorMessage) ?? undefined,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function parseAceStepResponse(response: Response): Promise<AceStepApiResponse> {
+  const text = await response.text();
+
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text) as AceStepApiResponse;
+  } catch {
+    throw new Error("ACE-Step API returned invalid JSON.");
+  }
+}
+
+function readAceStepString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function readAceStepDuration(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.round(value));
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+
+  return undefined;
 }
 
 function mapAudioInfoToProviderTrack(item: AudioInfo) {
@@ -125,6 +244,7 @@ export async function getMusicStatusFromProvider(
     const mapped = mapAudioInfoToProviderTrack(item);
 
     return {
+      provider: "SUNO",
       providerTaskId: mapped.providerTaskId,
       title: mapped.title,
       status: mapped.status,
@@ -157,32 +277,32 @@ export async function getAlignedLyricsFromProvider(
   }
 
   const mapped = alignedWords.map((item): ProviderAlignedLyricWord | null => {
-      if (!item || typeof item !== "object") {
-        return null;
-      }
+    if (!item || typeof item !== "object") {
+      return null;
+    }
 
-      const word = (item as { word?: unknown }).word;
-      const start = (item as { start_s?: unknown }).start_s;
-      const end = (item as { end_s?: unknown }).end_s;
+    const word = (item as { word?: unknown }).word;
+    const start = (item as { start_s?: unknown }).start_s;
+    const end = (item as { end_s?: unknown }).end_s;
 
-      if (typeof word !== "string" || typeof start !== "number" || typeof end !== "number") {
-        return null;
-      }
+    if (typeof word !== "string" || typeof start !== "number" || typeof end !== "number") {
+      return null;
+    }
 
-      return {
-        word,
-        start_s: start,
-        end_s: end,
-        success:
-          typeof (item as { success?: unknown }).success === "boolean"
-            ? ((item as { success?: boolean }).success ?? undefined)
-            : undefined,
-        p_align:
-          typeof (item as { p_align?: unknown }).p_align === "number"
-            ? ((item as { p_align?: number }).p_align ?? undefined)
-            : undefined,
-      };
-    });
+    return {
+      word,
+      start_s: start,
+      end_s: end,
+      success:
+        typeof (item as { success?: unknown }).success === "boolean"
+          ? ((item as { success?: boolean }).success ?? undefined)
+          : undefined,
+      p_align:
+        typeof (item as { p_align?: unknown }).p_align === "number"
+          ? ((item as { p_align?: number }).p_align ?? undefined)
+          : undefined,
+    };
+  });
 
   return mapped.filter((item): item is ProviderAlignedLyricWord => item !== null);
 }
@@ -262,5 +382,3 @@ export async function getAlignedLyricDataFromProvider(providerTaskId: string): P
       alignedLinesFromProvider.length > 0 ? alignedLinesFromProvider : buildAlignedLyricLines(alignedWords),
   };
 }
-
-

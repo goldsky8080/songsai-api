@@ -1,4 +1,6 @@
-export type PublicMusicStatus = "queued" | "processing" | "completed" | "failed";
+﻿export type PublicMusicStatus = "queued" | "processing" | "completed" | "failed";
+
+export type MusicProvider = "suno" | "ace_step";
 
 export type ProviderAlignedLyricWord = {
   word: string;
@@ -13,6 +15,7 @@ export type CreateMusicInput = {
   title?: string;
   lyrics: string;
   stylePrompt: string;
+  provider?: MusicProvider;
   lyricMode?: "manual" | "auto" | "ai_lyrics";
   isMr?: boolean;
   vocalGender?: "auto" | "female" | "male";
@@ -36,6 +39,7 @@ export type ProviderMusicTrack = {
 };
 
 export type ProviderMusicResult = {
+  provider?: string;
   providerTaskId: string;
   title?: string;
   status: PublicMusicStatus;
@@ -134,3 +138,4 @@ export type RecentMusicResponse = {
     fetchedAt: string;
   };
 };
+

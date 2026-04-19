@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+﻿import { randomUUID } from "node:crypto";
 import { JobTargetType, JobType, MusicStatus, Prisma, QueueStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
@@ -71,6 +71,21 @@ function parseProviderDetail(detail: unknown) {
     return null;
   }
 }
+function toStoredProvider(provider: "suno" | "ace_step") {
+  return provider === "ace_step" ? "ACE_STEP" : "SUNO";
+}
+
+function shouldSchedulePollJob(
+  provider: "suno" | "ace_step",
+  status: "queued" | "processing" | "completed" | "failed",
+  mp3Url?: string | null,
+) {
+  if (provider === "ace_step" && status === "completed" && mp3Url) {
+    return false;
+  }
+
+  return true;
+}
 
 function buildProviderErrorResponse(error: unknown) {
   const errorObject = error as {
@@ -89,7 +104,7 @@ function buildProviderErrorResponse(error: unknown) {
   if (status === 429) {
     return NextResponse.json(
       {
-        error: "현재 생성 대기열이 가득 차 있습니다. 잠시 후 다시 시도해 주세요.",
+        error: "?꾩옱 ?앹꽦 ?湲곗뿴??媛??李??덉뒿?덈떎. ?좎떆 ???ㅼ떆 ?쒕룄??二쇱꽭??",
         code: "SUNO_QUEUE_FULL",
         providerMessage: detail?.message ?? errorObject.message ?? null,
         runningClipIds: detail?.running_clip_ids ?? [],
@@ -266,6 +281,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const providerResult = await createMusicWithProvider(parsed.data);
+    const storedProvider = toStoredProvider(parsed.data.provider);
     const tracks =
       providerResult.tracks && providerResult.tracks.length > 0
         ? providerResult.tracks
@@ -305,7 +321,7 @@ export async function POST(request: NextRequest) {
           lyrics: parsed.data.lyrics,
           stylePrompt: parsed.data.stylePrompt,
           isMr: parsed.data.isMr,
-          provider: "SUNO",
+          provider: storedProvider,
           providerTaskId: primaryTrack.providerTaskId,
           mp3Url: primaryTrack.mp3Url ?? null,
           imageUrl: primaryTrack.imageUrl ?? null,
@@ -320,21 +336,23 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      await tx.generationJob.create({
-        data: {
-          userId: sessionUser.id,
-          musicId: primaryMusic.id,
-          targetType: JobTargetType.MUSIC,
-          jobType: JobType.MUSIC_STATUS_POLL,
-          queueStatus: QueueStatus.QUEUED,
-          priority: 100,
-          maxAttempts: 6,
-          runAfter: new Date(Date.now() + 5 * 60 * 1000),
-          providerTaskId: primaryTrack.providerTaskId,
-          payload: toInputJson(parsed.data),
-          result: toInputJson(primaryTrack),
-        },
-      });
+      if (shouldSchedulePollJob(parsed.data.provider, primaryTrack.status, primaryTrack.mp3Url)) {
+        await tx.generationJob.create({
+          data: {
+            userId: sessionUser.id,
+            musicId: primaryMusic.id,
+            targetType: JobTargetType.MUSIC,
+            jobType: JobType.MUSIC_STATUS_POLL,
+            queueStatus: QueueStatus.QUEUED,
+            priority: 100,
+            maxAttempts: 6,
+            runAfter: new Date(Date.now() + 5 * 60 * 1000),
+            providerTaskId: primaryTrack.providerTaskId,
+            payload: toInputJson(parsed.data),
+            result: toInputJson(primaryTrack),
+          },
+        });
+      }
 
       for (const extraTrack of extraTracks) {
         if (!extraTrack.providerTaskId) {
@@ -349,7 +367,7 @@ export async function POST(request: NextRequest) {
             lyrics: parsed.data.lyrics,
             stylePrompt: parsed.data.stylePrompt,
             isMr: parsed.data.isMr,
-            provider: "SUNO",
+            provider: storedProvider,
             providerTaskId: extraTrack.providerTaskId,
             mp3Url: extraTrack.mp3Url ?? null,
             imageUrl: extraTrack.imageUrl ?? null,
@@ -365,21 +383,23 @@ export async function POST(request: NextRequest) {
           },
         });
 
-        await tx.generationJob.create({
-          data: {
-            userId: sessionUser.id,
-            musicId: bonusMusic.id,
-            targetType: JobTargetType.MUSIC,
-            jobType: JobType.MUSIC_STATUS_POLL,
-            queueStatus: QueueStatus.QUEUED,
-            priority: 100,
-            maxAttempts: 6,
-            runAfter: new Date(Date.now() + 5 * 60 * 1000),
-            providerTaskId: extraTrack.providerTaskId,
-            payload: toInputJson(parsed.data),
-            result: toInputJson(extraTrack),
-          },
-        });
+        if (shouldSchedulePollJob(parsed.data.provider, extraTrack.status, extraTrack.mp3Url)) {
+          await tx.generationJob.create({
+            data: {
+              userId: sessionUser.id,
+              musicId: bonusMusic.id,
+              targetType: JobTargetType.MUSIC,
+              jobType: JobType.MUSIC_STATUS_POLL,
+              queueStatus: QueueStatus.QUEUED,
+              priority: 100,
+              maxAttempts: 6,
+              runAfter: new Date(Date.now() + 5 * 60 * 1000),
+              providerTaskId: extraTrack.providerTaskId,
+              payload: toInputJson(parsed.data),
+              result: toInputJson(extraTrack),
+            },
+          });
+        }
       }
 
       return primaryMusic;
@@ -404,3 +424,4 @@ export async function OPTIONS(request: NextRequest) {
     headers: buildCorsHeaders(request),
   });
 }
+

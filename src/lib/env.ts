@@ -1,4 +1,4 @@
-import { z } from "zod";
+﻿import { z } from "zod";
 
 const emptyStringToUndefined = z.preprocess((value) => {
   if (value === "") {
@@ -26,6 +26,9 @@ const envSchema = z.object({
   INBOUND_WEBHOOK_SECRET: emptyStringToUndefined,
   SUPPORT_INBOX_EMAIL: emptyStringToUndefined,
   SUNO_COOKIE: emptyStringToUndefined,
+  ACE_STEP_API_BASE_URL: emptyStringToUndefined,
+  ACE_STEP_API_KEY: emptyStringToUndefined,
+  ACE_STEP_TIMEOUT_MS: emptyStringToUndefined,
   TWOCAPTCHA_KEY: emptyStringToUndefined,
   BROWSER: emptyStringToUndefined,
   BROWSER_GHOST_CURSOR: emptyStringToUndefined,
@@ -63,6 +66,9 @@ export function getEnv() {
     INBOUND_WEBHOOK_SECRET: process.env.INBOUND_WEBHOOK_SECRET,
     SUPPORT_INBOX_EMAIL: process.env.SUPPORT_INBOX_EMAIL,
     SUNO_COOKIE: process.env.SUNO_COOKIE,
+    ACE_STEP_API_BASE_URL: process.env.ACE_STEP_API_BASE_URL,
+    ACE_STEP_API_KEY: process.env.ACE_STEP_API_KEY,
+    ACE_STEP_TIMEOUT_MS: process.env.ACE_STEP_TIMEOUT_MS,
     TWOCAPTCHA_KEY: process.env.TWOCAPTCHA_KEY,
     BROWSER: process.env.BROWSER,
     BROWSER_GHOST_CURSOR: process.env.BROWSER_GHOST_CURSOR,
@@ -76,3 +82,4 @@ export function getEnv() {
   cachedEnv = parsedEnv;
   return parsedEnv;
 }
+
