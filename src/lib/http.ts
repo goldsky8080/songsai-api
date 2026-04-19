@@ -27,7 +27,7 @@ export function buildCorsHeaders(request: NextRequest) {
   return {
     "Access-Control-Allow-Origin": origin ?? fallbackOrigin,
     "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Expose-Headers": "Content-Disposition, Content-Type",
     Vary: "Origin",
