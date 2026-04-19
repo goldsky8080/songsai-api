@@ -20,7 +20,8 @@ export type CreateMusicInput = {
   isMr?: boolean;
   vocalGender?: "auto" | "female" | "male";
   trackCount?: 1;
-  modelVersion?: "v4_5_plus" | "v5" | "v5_5";
+  modelVersion?: "v4_5_plus" | "v5" | "v5_5" | "ace_step_1_5";
+  duration?: 120 | 150 | 180;
 };
 
 export type ProviderMusicTrack = {

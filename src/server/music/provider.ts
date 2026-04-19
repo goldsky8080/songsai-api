@@ -23,7 +23,7 @@ type AceStepApiResponse = {
   errorMessage?: unknown;
 };
 
-function resolveModelVersion(modelVersion?: "v4_5_plus" | "v5" | "v5_5") {
+function resolveModelVersion(modelVersion?: "v4_5_plus" | "v5" | "v5_5" | "ace_step_1_5") {
   if (modelVersion === "v4_5_plus") {
     return "chirp-bluejay";
   }
@@ -142,6 +142,11 @@ async function createMusicWithAceStep(input: CreateMusicRequest): Promise<Provid
         lyrics: input.lyrics,
         stylePrompt: input.stylePrompt,
         provider: "ace_step",
+        model: "acestep-v15-turbo",
+        modelVersion: input.modelVersion === "ace_step_1_5" ? input.modelVersion : "ace_step_1_5",
+        duration: input.duration ?? 120,
+        thinking: false,
+        vocalLanguage: "ko",
       }),
       signal: controller.signal,
       cache: "no-store",

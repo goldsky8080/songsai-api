@@ -11,7 +11,8 @@ export const createMusicSchema = z.object({
   isMr: z.boolean().default(false),
   vocalGender: z.enum(["auto", "female", "male"]).default("auto"),
   trackCount: z.literal(1).default(1),
-  modelVersion: z.enum(["v4_5_plus", "v5", "v5_5"]).default("v5_5"),
+  modelVersion: z.enum(["v4_5_plus", "v5", "v5_5", "ace_step_1_5"]).default("v5_5"),
+  duration: z.number().int().min(120).max(180).optional(),
 });
 
 export type CreateProvider = z.infer<typeof createProviderSchema>;
