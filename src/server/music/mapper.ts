@@ -1,4 +1,5 @@
 import { MusicStatus, VideoStatus, type Music, type Video } from "@prisma/client";
+import { getEnv } from "@/lib/env";
 
 import { getDownloadAvailableAt, isDownloadReady } from "./policy";
 import type { MusicItem, PublicMusicStatus, RecentMusicItem } from "./types";
@@ -26,7 +27,12 @@ function getMusicTitle(music: Music) {
 }
 
 function resolveMusicImageUrl(music: Music) {
-  return music.imageUrl ?? null;
+  if (!music.imageUrl) {
+    return null;
+  }
+
+  const appUrl = getEnv().APP_URL.replace(/\/$/, "");
+  return `${appUrl}/api/v1/music/${music.id}/cover`;
 }
 
 export function isRecentCompletedMusic(music: Music) {
@@ -125,3 +131,4 @@ export function toRecentMusicItem(music: Music): RecentMusicItem {
     tags: null,
   };
 }
+
