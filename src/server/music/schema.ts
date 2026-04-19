@@ -12,6 +12,7 @@ export const createMusicSchema = z.object({
   vocalGender: z.enum(["auto", "female", "male"]).default("auto"),
   trackCount: z.literal(1).default(1),
   modelVersion: z.enum(["v4_5_plus", "v5", "v5_5", "ace_step_1_5"]).default("v5_5"),
+  model: z.enum(["acestep-v15-turbo", "acestep-v15-sft", "acestep-v15-base", "acestep-v15-turbo-rl"]).optional(),
   duration: z.number().int().min(120).max(180).optional(),
 });
 

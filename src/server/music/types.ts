@@ -22,6 +22,7 @@ export type CreateMusicInput = {
   trackCount?: 1;
   modelVersion?: "v4_5_plus" | "v5" | "v5_5" | "ace_step_1_5";
   duration?: 120 | 150 | 180;
+  model?: "acestep-v15-turbo" | "acestep-v15-sft" | "acestep-v15-base" | "acestep-v15-turbo-rl";
 };
 
 export type ProviderMusicTrack = {

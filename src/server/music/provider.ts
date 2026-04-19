@@ -142,7 +142,7 @@ async function createMusicWithAceStep(input: CreateMusicRequest): Promise<Provid
         lyrics: input.lyrics,
         stylePrompt: input.stylePrompt,
         provider: "ace_step",
-        model: "acestep-v15-turbo",
+        model: input.model ?? "acestep-v15-turbo",
         modelVersion: input.modelVersion === "ace_step_1_5" ? input.modelVersion : "ace_step_1_5",
         duration: input.duration ?? 120,
         thinking: false,
