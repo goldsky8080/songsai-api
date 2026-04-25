@@ -10,6 +10,18 @@ export const dynamic = "force-dynamic";
 
 type ExploreSort = "latest" | "weekly" | "monthly";
 
+function parseProviderFilter(value: string | null) {
+  if (value === "suno") {
+    return "SUNO" as const;
+  }
+
+  if (value === "ace_step") {
+    return "ACE_STEP" as const;
+  }
+
+  return null;
+}
+
 function getArtistName(user: { name: string | null; email: string }) {
   return user.name?.trim() || user.email.split("@")[0] || "SongsAI Artist";
 }
@@ -36,7 +48,7 @@ function getRangeDate(sort: ExploreSort) {
   return null;
 }
 
-async function buildRankedIds(sort: "weekly" | "monthly") {
+async function buildRankedIds(sort: "weekly" | "monthly", provider: "SUNO" | "ACE_STEP" | null) {
   const since = getRangeDate(sort);
 
   const ranked = await db.musicLike.groupBy({
@@ -47,6 +59,7 @@ async function buildRankedIds(sort: "weekly" | "monthly") {
       },
       music: {
         isPublic: true,
+        ...(provider ? { provider } : {}),
       },
     },
     _count: {
@@ -69,6 +82,7 @@ export async function GET(request: NextRequest) {
   const parsedOffset = Number.parseInt(request.nextUrl.searchParams.get("offset") ?? "0", 10);
   const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 30) : 12;
   const offset = Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0;
+  const provider = parseProviderFilter(request.nextUrl.searchParams.get("provider"));
 
   let orderBy: Prisma.MusicOrderByWithRelationInput | Prisma.MusicOrderByWithRelationInput[] = {
     createdAt: "desc",
@@ -76,7 +90,7 @@ export async function GET(request: NextRequest) {
   let rankedIds: string[] = [];
 
   if (sort === "weekly" || sort === "monthly") {
-    rankedIds = await buildRankedIds(sort);
+    rankedIds = await buildRankedIds(sort, provider);
     if (rankedIds.length === 0) {
       return NextResponse.json(
         {
@@ -91,6 +105,7 @@ export async function GET(request: NextRequest) {
   const where: Prisma.MusicWhereInput = {
     isPublic: true,
     mp3Url: { not: null },
+    ...(provider ? { provider } : {}),
     ...(rankedIds.length > 0 ? { id: { in: rankedIds } } : {}),
   };
 

@@ -12,6 +12,18 @@ import { createMusicSchema } from "@/server/music/schema";
 
 export const dynamic = "force-dynamic";
 
+function parseProviderFilter(value: string | null) {
+  if (value === "suno") {
+    return "SUNO" as const;
+  }
+
+  if (value === "ace_step") {
+    return "ACE_STEP" as const;
+  }
+
+  return null;
+}
+
 function toDbMusicStatus(status: "queued" | "processing" | "completed" | "failed") {
   switch (status) {
     case "processing":
@@ -158,17 +170,18 @@ export async function GET(request: NextRequest) {
   const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 50) : 20;
   const parsedOffset = Number.parseInt(request.nextUrl.searchParams.get("offset") ?? "0", 10);
   const offset = Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0;
+  const provider = parseProviderFilter(request.nextUrl.searchParams.get("provider"));
+  const where: Prisma.MusicWhereInput = {
+    userId: sessionUser.id,
+    ...(provider ? { provider } : {}),
+  };
 
   const total = await db.music.count({
-    where: {
-      userId: sessionUser.id,
-    },
+    where,
   });
 
   let items = await db.music.findMany({
-    where: {
-      userId: sessionUser.id,
-    },
+    where,
     include: {
       videos: {
         orderBy: {
@@ -225,9 +238,7 @@ export async function GET(request: NextRequest) {
       );
 
       items = await db.music.findMany({
-        where: {
-          userId: sessionUser.id,
-        },
+        where,
         include: {
           videos: {
             orderBy: {
