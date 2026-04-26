@@ -4,6 +4,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { buildCorsHeaders } from "@/lib/http";
+import {
+  consumeMusicGenerationCredits,
+  InsufficientCreditsError,
+  refundMusicGenerationCredits,
+} from "@/server/credits/service";
 import { runMusicWorker } from "@/server/music/worker";
 import { toMusicItem } from "@/server/music/mapper";
 import { getMusicStatusFromProvider, createMusicWithProvider } from "@/server/music/provider";
@@ -290,9 +295,33 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const storedProvider = toStoredProvider(parsed.data.provider);
+  const requestGroupId = randomUUID();
+  let createdPrimary: { id: string } | null = null;
+
   try {
+    createdPrimary = await db.$transaction(async (tx) => {
+      const primaryMusic = await tx.music.create({
+        data: {
+          userId: sessionUser.id,
+          requestGroupId,
+          title: parsed.data.title?.trim() || null,
+          lyrics: parsed.data.lyrics,
+          stylePrompt: parsed.data.stylePrompt,
+          isMr: parsed.data.isMr,
+          provider: storedProvider,
+          rawStatus: "queued",
+          rawPayload: toInputJson(parsed.data),
+          status: MusicStatus.QUEUED,
+        },
+      });
+
+      await consumeMusicGenerationCredits(sessionUser.id, primaryMusic.id, parsed.data.provider, tx);
+
+      return primaryMusic;
+    });
+
     const providerResult = await createMusicWithProvider(parsed.data);
-    const storedProvider = toStoredProvider(parsed.data.provider);
     const tracks =
       providerResult.tracks && providerResult.tracks.length > 0
         ? providerResult.tracks
@@ -315,30 +344,25 @@ export async function POST(request: NextRequest) {
     const [primaryTrack, ...extraTracks] = tracks;
 
     if (!primaryTrack?.providerTaskId) {
-      return NextResponse.json(
-        { error: "Provider did not return a usable primary track." },
-        { status: 502, headers: buildCorsHeaders(request) },
-      );
+      throw new Error("Provider did not return a usable primary track.");
     }
 
-    const requestGroupId = randomUUID();
+    if (!createdPrimary) {
+      throw new Error("Primary music placeholder was not created.");
+    }
 
-    const createdPrimary = await db.$transaction(async (tx) => {
-      const primaryMusic = await tx.music.create({
+    const primaryMusicId = createdPrimary.id;
+
+    const persistedPrimary = await db.$transaction(async (tx) => {
+      const primaryMusic = await tx.music.update({
+        where: { id: primaryMusicId },
         data: {
-          userId: sessionUser.id,
-          requestGroupId,
           title: primaryTrack.title?.trim() || parsed.data.title?.trim() || null,
-          lyrics: parsed.data.lyrics,
-          stylePrompt: parsed.data.stylePrompt,
-          isMr: parsed.data.isMr,
-          provider: storedProvider,
           providerTaskId: primaryTrack.providerTaskId,
           mp3Url: primaryTrack.mp3Url ?? null,
           imageUrl: primaryTrack.imageUrl ?? null,
           videoUrl: primaryTrack.videoUrl ?? null,
           rawStatus: primaryTrack.status,
-          rawPayload: toInputJson(parsed.data),
           rawResponse: toInputJson(providerResult),
           status: toDbMusicStatus(primaryTrack.status),
           duration: parseDuration(primaryTrack.duration),
@@ -417,10 +441,40 @@ export async function POST(request: NextRequest) {
     });
 
     return NextResponse.json(
-      { item: toMusicItem(createdPrimary) },
+      { item: toMusicItem(persistedPrimary) },
       { status: 201, headers: buildCorsHeaders(request) },
     );
   } catch (error) {
+    if (error instanceof InsufficientCreditsError) {
+      return NextResponse.json(
+        {
+          error: "Insufficient credits.",
+          requiredCredits: error.requiredCredits,
+          currentCredits: error.currentCredits,
+        },
+        { status: 402, headers: buildCorsHeaders(request) },
+      );
+    }
+
+    if (createdPrimary) {
+      await refundMusicGenerationCredits(sessionUser.id, createdPrimary.id).catch(() => {
+        // Preserve the original provider error response even if refund retry fails.
+      });
+
+      await db.music
+        .update({
+          where: { id: createdPrimary.id },
+          data: {
+            status: MusicStatus.FAILED,
+            rawStatus: "failed",
+            errorMessage: error instanceof Error ? error.message : "Music generation request failed.",
+          },
+        })
+        .catch(() => {
+          // Ignore secondary failures here so the provider error can still surface.
+        });
+    }
+
     const response = buildProviderErrorResponse(error);
     Object.entries(buildCorsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);

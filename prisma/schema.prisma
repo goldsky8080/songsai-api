@@ -13,6 +13,48 @@ enum UserRole {
   ADMIN
 }
 
+enum CreditKind {
+  FREE
+  PAID
+}
+
+enum CreditGrantStatus {
+  ACTIVE
+  CONSUMED
+  EXPIRED
+  CANCELLED
+}
+
+enum CreditTransactionType {
+  PURCHASE
+  USAGE
+  REFUND
+  ADJUSTMENT
+  PROMOTION
+  EXPIRATION
+}
+
+enum CreditTransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum PaymentProvider {
+  STRIPE
+  PORTONE
+}
+
+enum PaymentOrderStatus {
+  PENDING
+  CHECKOUT_CREATED
+  PAID
+  FAILED
+  CANCELED
+  REFUNDED
+}
+
 enum MusicStatus {
   QUEUED
   PROCESSING
@@ -93,6 +135,9 @@ model User {
   musics         Music[]
   musicLikes     MusicLike[]
   generationJobs GenerationJob[]
+  creditGrants   CreditGrant[]
+  creditTransactions CreditTransaction[]
+  paymentOrders  PaymentOrder[]
   emailVerificationTokens EmailVerificationToken[]
   passwordResetTokens PasswordResetToken[]
 }
@@ -188,6 +233,7 @@ model Music {
   videos         Video[]
   likes          MusicLike[]
   generationJobs GenerationJob[]
+  creditTransactions CreditTransaction[]
 
   @@index([userId, createdAt])
   @@index([requestGroupId, createdAt])
@@ -208,6 +254,83 @@ model MusicLike {
   @@index([musicId, createdAt])
   @@index([userId, createdAt])
   @@index([createdAt])
+}
+
+model CreditGrant {
+  id              String            @id @default(cuid())
+  userId          String
+  creditKind      CreditKind
+  amount          Int
+  remainingAmount Int
+  expiresAt       DateTime?
+  lastUsedAt      DateTime?
+  status          CreditGrantStatus @default(ACTIVE)
+  source          String?
+  paymentOrderId  String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  paymentOrder PaymentOrder? @relation(fields: [paymentOrderId], references: [id], onDelete: SetNull)
+
+  @@index([userId, creditKind, status])
+  @@index([expiresAt, status])
+  @@index([paymentOrderId])
+}
+
+model CreditTransaction {
+  id             String                  @id @default(cuid())
+  userId         String
+  musicId        String?
+  videoId        String?
+  paymentOrderId String?
+  amount         Int
+  creditKind     CreditKind?
+  type           CreditTransactionType
+  status         CreditTransactionStatus @default(COMPLETED)
+  balanceAfter   Int
+  memo           String?
+  metadata       Json?
+  createdAt      DateTime                @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  music        Music?        @relation(fields: [musicId], references: [id], onDelete: SetNull)
+  video        Video?        @relation(fields: [videoId], references: [id], onDelete: SetNull)
+  paymentOrder PaymentOrder? @relation(fields: [paymentOrderId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([type, status])
+  @@index([musicId])
+  @@index([videoId])
+  @@index([paymentOrderId])
+}
+
+model PaymentOrder {
+  id                    String             @id @default(cuid())
+  userId                String
+  provider              PaymentProvider
+  status                PaymentOrderStatus @default(PENDING)
+  productCode           String
+  requestedCredits      Int
+  amount                Int
+  currency              String             @default("KRW")
+  stripeSessionId       String?            @unique
+  stripePaymentIntentId String?            @unique
+  stripeCustomerId      String?
+  externalOrderId       String             @unique
+  paidAt                DateTime?
+  refundedAt            DateTime?
+  rawPayload            Json?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  creditGrants       CreditGrant[]
+  creditTransactions CreditTransaction[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([provider, status])
 }
 
 model MusicAsset {
@@ -251,6 +374,7 @@ model Video {
 
   music          Music           @relation(fields: [musicId], references: [id], onDelete: Cascade)
   generationJobs GenerationJob[]
+  creditTransactions CreditTransaction[]
 
   @@index([musicId, createdAt])
   @@index([status])
