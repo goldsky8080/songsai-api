@@ -17,6 +17,10 @@ const prepareSchema = z.object({
   productCode: z.enum(["credit_110", "credit_350", "credit_590"]),
 });
 
+function toPortoneCustomerId(userId: string) {
+  return userId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 20);
+}
+
 export async function POST(request: NextRequest) {
   const sessionUser = await getSessionUser();
   const corsHeaders = buildCorsHeaders(request);
@@ -78,7 +82,7 @@ export async function POST(request: NextRequest) {
         },
       },
       customer: {
-        customerId: sessionUser.id,
+        customerId: toPortoneCustomerId(sessionUser.id),
         fullName: sessionUser.email,
         email: sessionUser.email,
       },
