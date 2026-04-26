@@ -66,11 +66,17 @@ export async function POST(request: NextRequest) {
       paymentOrderId: order.id,
       storeId: config.storeId,
       channelKey: config.channelKey,
+      pgProvider: "galaxia",
       redirectUrl: config.redirectUrl,
       noticeUrls: [config.noticeUrl],
       orderName: `${product.credits} Credits`,
       totalAmount: product.amount,
       currency: product.currency,
+      bypass: {
+        galaxia: {
+          ITEM_CODE: product.code,
+        },
+      },
       customer: {
         customerId: sessionUser.id,
         fullName: sessionUser.email,
