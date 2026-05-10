@@ -77,6 +77,9 @@ type GenerationMetadata = {
   [key: string]: any;
 };
 
+type InitializeClipUploadResponse = Record<string, any>;
+type FinishClipUploadResponse = Record<string, any>;
+
 type CaptchaCreateContext = {
   prompt?: string;
   tags?: string;
@@ -1083,6 +1086,64 @@ class SunoApi {
     return audios;
   }
 
+  public async underpaint({
+    underpaintingClipId,
+    prompt,
+    tags,
+    title,
+    model,
+    metadata
+  }: UnderpaintingParams): Promise<AudioInfo[]> {
+    await this.keepAlive();
+    const resolvedModel = metadata?.mv || model || DEFAULT_MODEL;
+    const captchaResult = await this.getCaptcha({ prompt, tags, title, metadata });
+    const payload: any = {
+      make_instrumental: false,
+      mv: resolvedModel,
+      prompt,
+      generation_type: 'TEXT',
+      task: 'underpainting',
+      title,
+      tags,
+      underpainting_clip_id: underpaintingClipId,
+      token: captchaResult,
+      transaction_uuid: randomUUID()
+    };
+
+    if (metadata) {
+      payload.metadata = {
+        ...metadata,
+        mv: metadata.mv || resolvedModel
+      };
+    }
+
+    const response = await this.client.post(`${SunoApi.BASE_URL}/api/generate/v2/`, payload, {
+      timeout: 10000
+    });
+
+    if (response.status !== 200) {
+      throw new Error('Error response:' + response.statusText);
+    }
+
+    return response.data.clips.map((audio: any) => ({
+      id: audio.id,
+      title: audio.title,
+      image_url: audio.image_url,
+      lyric: audio.metadata.prompt,
+      audio_url: audio.audio_url,
+      video_url: audio.video_url,
+      created_at: audio.created_at,
+      model_name: audio.model_name,
+      status: audio.status,
+      gpt_description_prompt: audio.metadata.gpt_description_prompt,
+      prompt: audio.metadata.prompt,
+      type: audio.metadata.type,
+      tags: audio.metadata.tags,
+      negative_tags: audio.metadata.negative_tags,
+      duration: audio.metadata.duration
+    }));
+  }
+
   /**
    * Generates songs based on the provided parameters.
    *
@@ -1515,7 +1576,155 @@ class SunoApi {
 
     return response.data;
   }
+
+  public async initializeClipUpload(uploadFilename: string): Promise<InitializeClipUploadResponse> {
+    await this.keepAlive(false);
+
+    const response = await this.client.post(
+      `${SunoApi.BASE_URL}/api/uploads/audio/`,
+      {
+        upload_type: 'file_upload',
+        upload_filename: uploadFilename
+      },
+      {
+        timeout: 10000
+      }
+    );
+
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+
+    return response.data;
+  }
+
+  public async finishClipUpload(uploadId: string, payload: Record<string, any>): Promise<FinishClipUploadResponse> {
+    await this.keepAlive(false);
+
+    const response = await this.client.post(
+      `${SunoApi.BASE_URL}/api/uploads/audio/${uploadId}/upload-finish/`,
+      payload,
+      {
+        timeout: 10000
+      }
+    );
+
+    if (response.status !== 200) {
+      throw new Error('Error response: ' + response.statusText);
+    }
+
+    return response.data;
+  }
+
+  public async setUploadedAudioMetadata(uploadId: string, payload: Record<string, any>): Promise<Record<string, any> | null> {
+    await this.keepAlive(false);
+
+    const candidatePaths = [
+      `${SunoApi.BASE_URL}/api/uploads/audio/${uploadId}/set_metadata/`,
+      `${SunoApi.BASE_URL}/api/uploads/audio/${uploadId}/set_metadata`,
+      `${SunoApi.BASE_URL}/api/uploads/audio/${uploadId}/metadata/`
+    ];
+
+    for (const url of candidatePaths) {
+      try {
+        const response = await this.client.post(url, payload, { timeout: 10000 });
+        if (response.status >= 200 && response.status < 300) {
+          logger.info({ url }, 'Uploaded audio metadata updated');
+          return response.data ?? null;
+        }
+      } catch (error: any) {
+        logger.warn({ url, message: error?.message, status: error?.response?.status }, 'Uploaded audio metadata update failed');
+      }
+    }
+
+    return null;
+  }
+
+  public async setUploadedAudioDescription(uploadId: string, description: string): Promise<Record<string, any> | null> {
+    await this.keepAlive(false);
+
+    const candidatePaths = [
+      `${SunoApi.BASE_URL}/api/uploads/audio/${uploadId}/set_audio_description/`,
+      `${SunoApi.BASE_URL}/api/uploads/audio/${uploadId}/set_audio_description`
+    ];
+    const candidatePayloads = [
+      { description },
+      { audio_description: description },
+      { display_tags: description }
+    ];
+
+    for (const url of candidatePaths) {
+      for (const payload of candidatePayloads) {
+        try {
+          const response = await this.client.post(url, payload, { timeout: 10000 });
+          if (response.status >= 200 && response.status < 300) {
+            logger.info({ url }, 'Uploaded audio description updated');
+            return response.data ?? null;
+          }
+        } catch (error: any) {
+          logger.warn({ url, message: error?.message, status: error?.response?.status }, 'Uploaded audio description update failed');
+        }
+      }
+    }
+
+    return null;
+  }
+
+  public async resolveUploadedAudio(candidates: Array<string | null | undefined>): Promise<AudioInfo | null> {
+    const ids = Array.from(new Set(candidates.map((value) => `${value || ''}`.trim()).filter(Boolean)));
+
+    for (const id of ids) {
+      try {
+        const feedResult = await this.get([id]);
+        if (feedResult[0]) {
+          logger.info({ id }, 'Resolved uploaded audio from feed');
+          return feedResult[0];
+        }
+      } catch (error: any) {
+        logger.warn({ id, message: error?.message }, 'Uploaded audio not yet available in feed lookup');
+      }
+
+      try {
+        const clipResult = await this.getClip(id) as any;
+        const clip = clipResult?.clip ?? clipResult;
+        if (clip?.id) {
+          logger.info({ id: clip.id }, 'Resolved uploaded audio from clip lookup');
+          return {
+            id: clip.id,
+            title: clip.title,
+            image_url: clip.image_url,
+            lyric: clip.metadata?.prompt ?? '',
+            audio_url: clip.audio_url,
+            video_url: clip.video_url,
+            created_at: clip.created_at,
+            model_name: clip.model_name,
+            status: clip.status,
+            gpt_description_prompt: clip.metadata?.gpt_description_prompt,
+            prompt: clip.metadata?.prompt,
+            type: clip.metadata?.type,
+            tags: clip.metadata?.tags,
+            negative_tags: clip.metadata?.negative_tags,
+            duration: clip.metadata?.duration,
+            error_message: clip.metadata?.error_message
+          };
+        }
+      } catch (error: any) {
+        logger.warn({ id, message: error?.message }, 'Uploaded audio not yet available in clip lookup');
+      }
+    }
+
+    return null;
+  }
 }
+
+type UnderpaintingParams = {
+  underpaintingClipId: string;
+  prompt: string;
+  tags: string;
+  title?: string;
+  model?: string;
+  metadata?: GenerationMetadata;
+};
 
 export const sunoApi = async (cookie?: string) => {
   const resolvedCookie = cookie && cookie.includes('__client') ? cookie : process.env.SUNO_COOKIE; // Check for bad `Cookie` header (It's too expensive to actually parse the cookies *here*)

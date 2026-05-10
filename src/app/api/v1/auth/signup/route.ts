@@ -1,8 +1,11 @@
 import bcrypt from "bcryptjs";
+import { CreditKind, CreditTransactionType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { buildCorsHeaders } from "@/lib/http";
 import { signupSchema } from "@/server/auth/schema";
+import { grantUserCredits } from "@/server/credits/service";
+import { SIGNUP_FREE_CREDITS } from "@/server/credits/constants";
 import { toPublicUser } from "@/server/auth/user";
 import {
   buildEmailVerificationUrl,
@@ -43,12 +46,31 @@ export async function POST(request: NextRequest) {
   }
 
   const passwordHash = await bcrypt.hash(parsed.data.password, 10);
-  const user = await db.user.create({
-    data: {
-      email,
-      name: parsed.data.name,
-      passwordHash,
-    },
+  const user = await db.$transaction(async (tx) => {
+    const createdUser = await tx.user.create({
+      data: {
+        email,
+        name: parsed.data.name,
+        passwordHash,
+      },
+    });
+
+    await grantUserCredits(
+      createdUser.id,
+      SIGNUP_FREE_CREDITS,
+      CreditKind.FREE,
+      "signup_bonus",
+      `welcome_bonus:${SIGNUP_FREE_CREDITS}`,
+      tx,
+      {
+        type: CreditTransactionType.PROMOTION,
+        metadata: {
+          reason: "signup_welcome_bonus",
+        },
+      },
+    );
+
+    return createdUser;
   });
 
   const verification = await createEmailVerificationToken(user.id);

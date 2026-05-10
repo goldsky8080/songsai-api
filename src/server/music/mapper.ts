@@ -83,12 +83,16 @@ export function toMusicItem(music: Music, latestVideoOrOptions?: Video | null | 
       ? { latestVideo: latestVideoOrOptions }
       : (latestVideoOrOptions ?? {});
   const latestVideo = options.latestVideo ?? null;
+  const isUploadedSource = music.provider === "SUNO_UPLOAD";
   const canDownload = !options.forceNoDownload && isDownloadReady(music.createdAt) && Boolean(music.mp3Url);
-  const canCreateVideo = !options.forceNoVideo && isDownloadReady(music.createdAt) && Boolean(music.mp3Url);
+  const canCreateVideo =
+    !isUploadedSource && !options.forceNoVideo && isDownloadReady(music.createdAt) && Boolean(music.mp3Url);
 
   return {
     id: music.id,
     requestGroupId: music.requestGroupId ?? null,
+    isBonusTrack: music.isBonusTrack,
+    bonusUnlockedAt: music.bonusUnlockedAt?.toISOString() ?? null,
     isPublic: music.isPublic,
     title: getMusicTitle(music),
     artistId: options.artistId ?? music.userId,

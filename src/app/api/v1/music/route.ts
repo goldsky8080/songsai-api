@@ -19,11 +19,15 @@ export const dynamic = "force-dynamic";
 
 function parseProviderFilter(value: string | null) {
   if (value === "suno") {
-    return "SUNO" as const;
+    return ["SUNO", "SUNO_UPLOAD"] as const;
   }
 
   if (value === "ace_step") {
-    return "ACE_STEP" as const;
+    return ["ACE_STEP"] as const;
+  }
+
+  if (value === "suno_upload") {
+    return ["SUNO_UPLOAD"] as const;
   }
 
   return null;
@@ -178,7 +182,7 @@ export async function GET(request: NextRequest) {
   const provider = parseProviderFilter(request.nextUrl.searchParams.get("provider"));
   const where: Prisma.MusicWhereInput = {
     userId: sessionUser.id,
-    ...(provider ? { provider } : {}),
+    ...(provider ? { provider: { in: [...provider] } } : {}),
   };
 
   const total = await db.music.count({

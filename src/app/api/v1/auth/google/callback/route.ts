@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { cookies } from "next/headers";
+import { CreditKind, CreditTransactionType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
@@ -10,6 +11,8 @@ import {
   createSessionToken,
 } from "@/lib/auth";
 import { getEnv } from "@/lib/env";
+import { SIGNUP_FREE_CREDITS } from "@/server/credits/constants";
+import { grantUserCredits } from "@/server/credits/service";
 
 export const dynamic = "force-dynamic";
 const GOOGLE_REDIRECT_COOKIE_NAME = "songsai-api-google-redirect";
@@ -115,17 +118,20 @@ export async function GET(request: NextRequest) {
 
   const email = userInfo.email.trim().toLowerCase();
 
-  const user = await db.$transaction(async (tx) => {
+  const { user } = await db.$transaction(async (tx) => {
     const linkedUser = await tx.user.findUnique({ where: { googleId: userInfo.sub } });
 
     if (linkedUser) {
-      return linkedUser;
+      return {
+        user: linkedUser,
+        shouldGrantWelcomeCredits: false,
+      };
     }
 
     const existingUser = await tx.user.findUnique({ where: { email } });
 
     if (existingUser) {
-      return tx.user.update({
+      const updatedUser = await tx.user.update({
         where: { id: existingUser.id },
         data: {
           googleId: userInfo.sub,
@@ -134,9 +140,14 @@ export async function GET(request: NextRequest) {
           emailVerifiedAt: existingUser.emailVerifiedAt ?? new Date(),
         },
       });
+
+      return {
+        user: updatedUser,
+        shouldGrantWelcomeCredits: false,
+      };
     }
 
-    return tx.user.create({
+    const createdUser = await tx.user.create({
       data: {
         email,
         googleId: userInfo.sub,
@@ -146,6 +157,27 @@ export async function GET(request: NextRequest) {
         emailVerifiedAt: new Date(),
       },
     });
+
+    await grantUserCredits(
+      createdUser.id,
+      SIGNUP_FREE_CREDITS,
+      CreditKind.FREE,
+      "signup_bonus",
+      `welcome_bonus:${SIGNUP_FREE_CREDITS}`,
+      tx,
+      {
+        type: CreditTransactionType.PROMOTION,
+        metadata: {
+          reason: "signup_welcome_bonus",
+          provider: "google",
+        },
+      },
+    );
+
+    return {
+      user: createdUser,
+      shouldGrantWelcomeCredits: true,
+    };
   });
 
   const token = await createSessionToken({

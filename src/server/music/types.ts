@@ -74,6 +74,8 @@ export type MusicTrackItem = {
 export type MusicItem = {
   id: string;
   requestGroupId: string | null;
+  isBonusTrack?: boolean;
+  bonusUnlockedAt?: string | null;
   isPublic?: boolean;
   title?: string;
   artistId?: string | null;

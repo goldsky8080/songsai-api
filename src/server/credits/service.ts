@@ -281,6 +281,9 @@ async function consumeCredits(
     chargedAmount: amount,
     freeSpent,
     paidSpent,
+    nextFreeCredits,
+    nextPaidCredits,
+    totalCredits: nextFreeCredits + nextPaidCredits,
   };
 }
 
